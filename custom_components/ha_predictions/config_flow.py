@@ -15,6 +15,7 @@ from .const import (
     CONF_ADDITIONAL_SETTINGS,
     CONF_ADDITIONAL_SETTINGS_IMPORT_FROM_RECORDER,
     CONF_FEATURE_ENTITY,
+    CONF_TARGET_ATTRIBUTE,
     CONF_TARGET_ENTITY,
     DOMAIN,
     LOGGER,
@@ -45,8 +46,20 @@ class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle a flow initialized by the user."""
         _errors = {}
         if user_input is not None:
+            target_attribute = user_input.get(CONF_TARGET_ATTRIBUTE, "").strip()
+            if target_attribute:
+                user_input[CONF_TARGET_ATTRIBUTE] = target_attribute
+            else:
+                user_input.pop(CONF_TARGET_ATTRIBUTE, None)
             await self.async_set_unique_id(
-                unique_id=slugify(user_input[CONF_TARGET_ENTITY])
+                unique_id=slugify(
+                    "_".join(
+                        filter(
+                            None,
+                            [user_input[CONF_TARGET_ENTITY], target_attribute],
+                        )
+                    )
+                )
             )
             LOGGER.debug("Set unique ID to %s", self.unique_id)
             self._abort_if_unique_id_configured()
@@ -56,14 +69,23 @@ class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             feature_entities: list[str] = user_input[CONF_FEATURE_ENTITY]
 
             # Check if target entity exists
-            if self.hass.states.get(target_entity) is None:
+            target_entity_state: State | NoneType = self.hass.states.get(target_entity)
+            if target_entity_state is None:
                 _errors["base"] = "target_entity_not_found"
 
             # Check if target entity is of correct domain
-            if not _errors:
+            if not _errors and not target_attribute:
                 target_domain = target_entity.split(".")[0]
                 if target_domain not in ["light", "switch", "input_boolean"]:
                     _errors["base"] = "target_entity_wrong_domain"
+
+            if (
+                not _errors
+                and target_attribute
+                and target_entity_state is not None
+                and target_attribute not in target_entity_state.attributes
+            ):
+                _errors["base"] = "target_attribute_not_found"
 
             # Check if all feature entities exist
             if not _errors:
@@ -72,7 +94,6 @@ class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                         _errors["base"] = "feature_entity_not_found"
                         break
 
-            target_entity_state: State | NoneType = self.hass.states.get(target_entity)
             if target_entity_state is not None:
                 target_entity_name = target_entity_state.attributes.get(
                     "friendly_name", target_entity
@@ -83,7 +104,9 @@ class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             # If no errors, create the entry
             if not _errors:
                 return self.async_create_entry(
-                    title="Prediction for " + target_entity_name,
+                    title="Prediction for "
+                    + target_entity_name
+                    + (f" {target_attribute}" if target_attribute else ""),
                     data=user_input,
                 )
 
@@ -92,9 +115,10 @@ class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_TARGET_ENTITY): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            filter=[{"domain": ["light", "switch", "input_boolean"]}]
-                        ),
+                        selector.EntitySelectorConfig(),
+                    ),
+                    vol.Optional(CONF_TARGET_ATTRIBUTE): selector.TextSelector(
+                        selector.TextSelectorConfig(),
                     ),
                     vol.Required(CONF_FEATURE_ENTITY): selector.EntitySelector(
                         selector.EntitySelectorConfig(multiple=True),

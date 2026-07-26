@@ -7,9 +7,16 @@ from typing import Any
 import numpy as np
 
 from .const import SamplingStrategy
-from .evaluation import accuracy, precision_recall_fscore
+from .evaluation import (
+    accuracy,
+    mae,
+    precision_recall_fscore,
+    r_squared,
+    rmse,
+)
 from .exceptions import ModelNotTrainedError
 from .logistic_regression import LogisticRegression
+from .regressors import LinearRegressor
 from .sampling import random_oversample, smote
 
 
@@ -19,10 +26,14 @@ class Model:
     def __init__(self, logger: Logger) -> None:
         """Initialize the Model class."""
         self.logger = logger
-        self.scores: tuple[float, dict[Any, dict[str, float]]] | NoneType = None
+        self.scores: tuple[str, float, dict[Any, Any]] | NoneType = None
         self.factors: dict[int, Any] = {}
-        self.model_eval: LogisticRegression | None = None
-        self.model_final: LogisticRegression | None = None
+        self.model_eval: (
+            LogisticRegression | LinearRegressor | None
+        ) = None
+        self.model_final: (
+            LogisticRegression | LinearRegressor | None
+        ) = None
         self.target_column_idx: int | None = None
         self.prediction_ready: bool = False
         self.transformations: dict[str, dict[str, Any]] = {
@@ -30,7 +41,9 @@ class Model:
             "sampling": {"type": SamplingStrategy.SMOTE, "k_neighbors": 5},
         }
 
-    def predict(self, data: np.ndarray) -> tuple[str, float] | NoneType:
+    def predict(
+        self, data: np.ndarray
+    ) -> tuple[str | float, float | None] | NoneType:
         """
         Make predictions and return original values.
 
@@ -85,6 +98,9 @@ class Model:
         # Predict
         predictions, probabilities = self.model_final.predict(data_encoded)
 
+        if predictions is not None and probabilities is None:
+            return (float(predictions[0]), None)
+
         if (
             self.target_column_idx is not None
             and self.target_column_idx in self.factors
@@ -92,11 +108,12 @@ class Model:
             and probabilities is not None
         ):
             target_categories = self.factors[self.target_column_idx]
-            label = target_categories[predictions[0]]
+            predicted_class = int(predictions[0])
+            label = target_categories[predicted_class]
             # Sigmoid output represents P(class=1), adjust for class 0
             # If predicted class is 0, probability should be 1 - sigmoid_output
             probability = (
-                probabilities[0] if predictions[0] == 1 else 1 - probabilities[0]
+                probabilities[0] if predicted_class == 1 else 1 - probabilities[0]
             )
             return (label, probability)
         return None
@@ -121,8 +138,10 @@ class Model:
         # Factorize categorical columns using numpy.unique
         # Create a new array with float dtype to avoid object dtype issues
         data_encoded, self.factors = self._factorize(data)
+        is_regression = self.target_column_idx not in self.factors
 
-        data_encoded = self._apply_sampling(data_encoded)
+        if not is_regression:
+            data_encoded = self._apply_sampling(data_encoded)
 
         # Split features and target
         x_train = data_encoded[:, :-1]
@@ -134,7 +153,7 @@ class Model:
             self.transformations["zscores"]["stds"] = stds
 
         # Train model
-        self.model_final = LogisticRegression()
+        self.model_final = self._build_model(is_regression=is_regression)
         self.logger.debug("Training of final model begins")
         self.model_final.fit(x_train, y_train)
         self.logger.debug("Training ends, model: %s", str(self.model_final))
@@ -153,51 +172,61 @@ class Model:
 
         filtered_arr = self._apply_filtering(data)
         self.logger.debug("Filtered data: %s", str(filtered_arr))
+        self.target_column_idx = filtered_arr.shape[1] - 1
 
         # Factorize categorical columns using numpy.unique
         # Create a new array with float dtype to avoid object dtype issues
         data_encoded, factors = self._factorize(filtered_arr)
+        is_regression = self.target_column_idx not in factors
 
         # train/test split in pure numpy with stratification
         rng = np.random.Generator(np.random.PCG64())
 
-        # Get target column (last column)
-        y = data_encoded[:, -1]
-        unique_classes = np.unique(y)
+        if is_regression:
+            indices = rng.permutation(len(data_encoded))
+            test_size = max(int(len(indices) * 0.25), 1)
+            if test_size >= len(indices):
+                raise ValueError("Regression evaluation needs at least two samples")
+            test_indices = indices[:test_size]
+            train_indices = indices[test_size:]
+        else:
+            # Get target column (last column)
+            y = data_encoded[:, -1]
+            unique_classes = np.unique(y)
 
-        train_indices = []
-        test_indices = []
+            train_indices = []
+            test_indices = []
 
-        # Stratify split based on last column
-        for cls in unique_classes:
-            cls_indices = np.where(y == cls)[0]
-            rng.shuffle(cls_indices)
+            # Stratify split based on last column
+            for cls in unique_classes:
+                cls_indices = np.where(y == cls)[0]
+                rng.shuffle(cls_indices)
 
-            n_cls = len(cls_indices)
-            # Ensure at least 1 test sample per class if there are 2+ samples
-            # For single-sample classes, put in training to avoid empty training sets
-            test_size_cls = max(int(n_cls * 0.25), 1) if n_cls > 1 else 0
+                n_cls = len(cls_indices)
+                # Ensure at least 1 test sample per class if there are 2+ samples
+                # For single-sample classes, put in training to avoid empty sets
+                test_size_cls = max(int(n_cls * 0.25), 1) if n_cls > 1 else 0
 
-            test_indices.extend(cls_indices[:test_size_cls])
-            train_indices.extend(cls_indices[test_size_cls:])
+                test_indices.extend(cls_indices[:test_size_cls])
+                train_indices.extend(cls_indices[test_size_cls:])
 
-        # Ensure at least 1 test sample overall (fallback for edge cases)
-        if len(test_indices) == 0 and len(train_indices) > 1:
-            # Move one sample from train to test
-            test_indices.append(train_indices.pop())
+            # Ensure at least 1 test sample overall (fallback for edge cases)
+            if len(test_indices) == 0 and len(train_indices) > 1:
+                test_indices.append(train_indices.pop())
 
-        # Shuffle the final indices to mix classes
-        train_indices = np.array(train_indices)
-        test_indices = np.array(test_indices)
-        rng.shuffle(train_indices)
-        rng.shuffle(test_indices)
+            # Shuffle the final indices to mix classes
+            train_indices = np.array(train_indices)
+            test_indices = np.array(test_indices)
+            rng.shuffle(train_indices)
+            rng.shuffle(test_indices)
 
         train = data_encoded[train_indices, :]
         test = data_encoded[test_indices, :]
         self.logger.debug("Data used for training: %s", str(train))
         self.logger.debug("Data used for testing: %s", str(test))
 
-        train = self._apply_sampling(train)
+        if not is_regression:
+            train = self._apply_sampling(train)
 
         # Split x and y
         x_train = train[:, :-1]
@@ -209,30 +238,47 @@ class Model:
             (means, stds, x_train) = self._apply_normalization(x_train)
             x_test = (x_test - means) / stds
 
-        self.model_eval = LogisticRegression()
+        self.model_eval = self._build_model(is_regression=is_regression)
         self.logger.debug("Training begins")
         self.model_eval.fit(x_train, y_train)
         self.logger.debug("Training ends, model: %s", str(self.model_eval))
 
         y_pred = self.model_eval.predict(x_test)[0]
         if y_pred is not None:
-            # Use the actual target column index (last column) to get class labels
-            target_col_idx = data_encoded.shape[1] - 1
-            class_labels = factors.get(target_col_idx)
-            self.scores = (
-                accuracy(y_pred, y_test),
-                precision_recall_fscore(
-                    y_pred,
-                    y_test,
-                    class_labels=class_labels,
-                ),
-            )
-            self.logger.debug(
-                "Evaluation results - Accuracy: %s",
-                str(self.scores[0]),
-            )
+            if is_regression:
+                self.scores = (
+                    "regression",
+                    r_squared(y_pred, y_test),
+                    {"mae": mae(y_pred, y_test), "rmse": rmse(y_pred, y_test)},
+                )
+                self.logger.debug(
+                    "Evaluation results - R-squared: %s", str(self.scores[1])
+                )
+            else:
+                # Use the actual target column index to get class labels.
+                class_labels = factors.get(self.target_column_idx)
+                self.scores = (
+                    "classification",
+                    accuracy(y_pred, y_test),
+                    precision_recall_fscore(
+                        y_pred,
+                        y_test,
+                        class_labels=class_labels,
+                    ),
+                )
+                self.logger.debug(
+                    "Evaluation results - Accuracy: %s", str(self.scores[1])
+                )
         else:
             self.scores = None
+
+    def _build_model(
+        self, *, is_regression: bool
+    ) -> LogisticRegression | LinearRegressor:
+        """Build the selected classifier or regressor."""
+        if is_regression:
+            return LinearRegressor()
+        return LogisticRegression()
 
     def _factorize(self, data: np.ndarray) -> tuple[np.ndarray, dict]:
         """
@@ -359,11 +405,27 @@ class Model:
             if self.transformations["sampling"]["type"] == SamplingStrategy.SMOTE:
                 # Apply SMOTE to training data
                 self.logger.debug("Applying SMOTE to training data")
-                x_train_smote, y_train_smote = smote(
-                    train[:, :-1],
-                    train[:, -1],
-                    k_neighbors=self.transformations["sampling"].get("k_neighbors", 5),
-                )
+                _, class_counts = np.unique(train[:, -1], return_counts=True)
+                if (
+                    len(class_counts) > 1
+                    and class_counts.min() < 2  # noqa: PLR2004
+                    and class_counts.min() < class_counts.max()
+                ):
+                    self.logger.warning(
+                        "SMOTE needs two samples per class; falling back to random "
+                        "oversampling."
+                    )
+                    x_train_smote, y_train_smote = random_oversample(
+                        train[:, :-1], train[:, -1]
+                    )
+                else:
+                    x_train_smote, y_train_smote = smote(
+                        train[:, :-1],
+                        train[:, -1],
+                        k_neighbors=self.transformations["sampling"].get(
+                            "k_neighbors", 5
+                        ),
+                    )
                 train = np.hstack((x_train_smote, y_train_smote.reshape(-1, 1)))
                 self.logger.debug("Training data after SMOTE: %s", train)
             elif (

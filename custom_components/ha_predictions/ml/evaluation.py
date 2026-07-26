@@ -35,6 +35,36 @@ def accuracy(y_pred: np.ndarray, y_gold: np.ndarray) -> float:
     return matches / total
 
 
+def mae(y_pred: np.ndarray, y_gold: np.ndarray) -> float:
+    """Calculate mean absolute error."""
+    _validate_regression_inputs(y_pred, y_gold)
+    return float(np.mean(np.abs(y_gold - y_pred)))
+
+
+def rmse(y_pred: np.ndarray, y_gold: np.ndarray) -> float:
+    """Calculate root mean squared error."""
+    _validate_regression_inputs(y_pred, y_gold)
+    return float(np.sqrt(np.mean((y_gold - y_pred) ** 2)))
+
+
+def r_squared(y_pred: np.ndarray, y_gold: np.ndarray) -> float:
+    """Calculate the coefficient of determination."""
+    _validate_regression_inputs(y_pred, y_gold)
+    residual_sum = float(np.sum((y_gold - y_pred) ** 2))
+    total_sum = float(np.sum((y_gold - np.mean(y_gold)) ** 2))
+    if total_sum == 0:
+        return 1.0 if residual_sum == 0 else 0.0
+    return 1 - residual_sum / total_sum
+
+
+def _validate_regression_inputs(y_pred: np.ndarray, y_gold: np.ndarray) -> None:
+    """Validate common regression metric inputs."""
+    if len(y_gold) == 0:
+        raise ValueError("Cannot compute regression metrics on empty labels")
+    if y_pred.shape != y_gold.shape:
+        raise ValueError("y_pred and y_gold must have the same shape")
+
+
 def precision_recall_fscore(
     y_pred: np.ndarray,
     y_gold: np.ndarray,

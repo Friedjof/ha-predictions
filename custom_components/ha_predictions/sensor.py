@@ -8,6 +8,7 @@ from homeassistant.components.sensor import SensorEntity, SensorEntityDescriptio
 
 from .const import (
     CONF_FEATURE_ENTITY,
+    CONF_TARGET_ATTRIBUTE,
     CONF_TARGET_ENTITY,
     ENTITY_KEY_CURRENT_PREDICTION,
     ENTITY_KEY_DATASET_SIZE,
@@ -117,7 +118,7 @@ class DatasetSensor(HAPredictionEntity, SensorEntity):
 class CurrentPredictionSensor(HAPredictionEntity, SensorEntity):
     """Sensor to display the current prediction made by the model."""
 
-    prediction_label: str | NoneType = None
+    prediction_label: str | float | NoneType = None
     prediction_probability: float | NoneType = None
 
     def __init__(
@@ -135,17 +136,20 @@ class CurrentPredictionSensor(HAPredictionEntity, SensorEntity):
         )
 
     @property
-    def native_value(self) -> str | None:
+    def native_value(self) -> str | float | None:
         """Return the native value of the sensor."""
         # Implement logic to return the current prediction value
         return self.prediction_label
 
     @property
-    def extra_state_attributes(self) -> dict[str, float | NoneType]:
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes of the sensor."""
         return {
             "probability": self.prediction_probability,
             "target_entity": self.coordinator.config_entry.data.get(CONF_TARGET_ENTITY),
+            "target_attribute": self.coordinator.config_entry.data.get(
+                CONF_TARGET_ATTRIBUTE
+            ),
         }
 
     @property
@@ -188,7 +192,7 @@ class PredictionPerformanceSensor(HAPredictionEntity, SensorEntity):
     def native_value(self) -> float | None:
         """Return the native value of the sensor."""
         if self.coordinator.scores is not None:
-            return self.coordinator.scores[0] * 100
+            return self.coordinator.scores[1] * 100
         return None
 
     @property
@@ -210,12 +214,15 @@ class PredictionPerformanceSensor(HAPredictionEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes of the sensor."""
         if self.coordinator.scores is not None:
-            prf = self.coordinator.scores[1]
-            ret = {}
-            for outer_key in prf:
-                for inner_key in prf[outer_key]:
-                    ret_key = f"{outer_key}_{inner_key}"
-                    ret[ret_key] = prf[outer_key][inner_key]
-            ret["data"] = prf
+            score_type, score, details = self.coordinator.scores
+            if score_type == "regression":
+                ret = {**details, "r_squared": score}
+            else:
+                ret = {}
+                for outer_key in details:
+                    for inner_key in details[outer_key]:
+                        ret_key = f"{outer_key}_{inner_key}"
+                        ret[ret_key] = details[outer_key][inner_key]
+                ret["data"] = details
             return ret
         return {}

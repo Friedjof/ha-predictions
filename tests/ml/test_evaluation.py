@@ -13,7 +13,13 @@ ha_predictions_path = (
 sys.path.insert(0, str(ha_predictions_path))
 
 from ml.const import F_SCORE, MACRO_AVERAGE, PRECISION, RECALL  # noqa: E402
-from ml.evaluation import accuracy, precision_recall_fscore  # noqa: E402
+from ml.evaluation import (  # noqa: E402
+    accuracy,
+    mae,
+    precision_recall_fscore,
+    r_squared,
+    rmse,
+)
 
 
 class TestAccuracy:
@@ -48,6 +54,26 @@ class TestAccuracy:
         # The score should be between 0 and 1
         assert 0 <= score <= 1
         assert score == 0.25
+
+
+class TestRegressionMetrics:
+    """Test regression evaluation metrics."""
+
+    def test_mae(self) -> None:
+        """Calculate mean absolute error."""
+        assert mae(np.array([2.0, 4.0]), np.array([1.0, 5.0])) == 1.0
+
+    def test_rmse(self) -> None:
+        """Calculate root mean squared error."""
+        assert np.isclose(
+            rmse(np.array([2.0, 5.0]), np.array([1.0, 3.0])), np.sqrt(2.5)
+        )
+
+    def test_r_squared(self) -> None:
+        """Calculate the coefficient of determination."""
+        y_gold = np.array([1.0, 2.0, 3.0])
+        assert r_squared(y_gold, y_gold) == 1.0
+        assert np.isclose(r_squared(np.array([2.0, 2.0, 2.0]), y_gold), 0.0)
 
 
 class TestPrecisionRecallFscore:

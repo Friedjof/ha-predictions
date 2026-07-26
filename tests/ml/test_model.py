@@ -178,13 +178,6 @@ class TestModelPredictProbabilities:
         # Predictions at extremes should be different classes
         assert label_low != label_high
 
-        # Both probabilities should represent confidence in predicted class
-        assert prob_low >= 0.5
-        assert prob_high >= 0.5
-
-        # Predictions at extremes should be different classes
-        assert label_low != label_high
-
 
 class TestModelInitialization:
     """Test Model initialization and attributes."""
@@ -332,7 +325,8 @@ class TestModelTrainEval:
 
         assert model.model_eval is not None
         assert model.scores is not None
-        assert 0.0 <= model.scores[0] <= 1.0
+        assert model.scores[0] == "classification"
+        assert 0.0 <= model.scores[1] <= 1.0
 
     def test_train_eval_sets_accuracy(self) -> None:
         """Test that train_eval sets accuracy attribute."""
@@ -346,8 +340,8 @@ class TestModelTrainEval:
         train_numpy = convert_df_to_numpy(train_data)
         model.train_eval(train_numpy)
 
-        assert isinstance(model.scores[0], float)
-        assert 0.0 <= model.scores[0] <= 1.0
+        assert isinstance(model.scores[1], float)
+        assert 0.0 <= model.scores[1] <= 1.0
 
     def test_train_eval_stratified_split(self) -> None:
         """Test that train_eval performs stratified split correctly."""
@@ -683,8 +677,8 @@ class TestModelEdgeCases:
         # Note: Due to DataFrame.to_numpy() with mixed types creating object dtype,
         # numeric columns may also be factorized. This documents actual behavior.
 
-    def test_predict_returns_none_for_numeric_target(self) -> None:
-        """Test that predict returns None for numeric target."""
+    def test_predict_returns_number_for_numeric_target(self) -> None:
+        """Test that predict returns a regression result for numeric targets."""
         model = Model(MockLogger())
         train_data = pd.DataFrame(
             {
@@ -699,8 +693,37 @@ class TestModelEdgeCases:
         test_numpy = convert_df_to_numpy(test_data)
         result = model.predict(test_numpy)
 
-        # Should return None if target is not categorical
-        assert result is None
+        assert result is not None
+        assert isinstance(result[0], float)
+        assert result[1] is None
+
+
+class TestModelRegression:
+    """Test numeric target regression."""
+
+    def test_train_final_predicts_numeric_target(self) -> None:
+        """Train the linear regressor and return a numeric prediction."""
+        model = Model(MockLogger())
+        data = np.array([[value, value * 2.0] for value in range(1, 11)])
+
+        model.train_final(data)
+        result = model.predict(np.array([[6.0]]))
+
+        assert result is not None
+        assert isinstance(result[0], float)
+        assert result[1] is None
+
+    def test_train_eval_returns_regression_scores(self) -> None:
+        """Report R-squared, MAE and RMSE for numeric targets."""
+        model = Model(MockLogger())
+        data = np.array([[value, value * 2.0] for value in range(1, 21)])
+
+        model.train_eval(data)
+
+        assert model.scores is not None
+        assert model.scores[0] == "regression"
+        assert isinstance(model.scores[1], float)
+        assert set(model.scores[2]) == {"mae", "rmse"}
 
 
 class TestModelNormalizationMethod:

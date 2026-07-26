@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from custom_components.ha_predictions.ml.const import EXCEPTION_SMOTE_NOT_ENOUGH_SAMPLES
+from .const import EXCEPTION_SMOTE_NOT_ENOUGH_SAMPLES
 
 
 def random_oversample(

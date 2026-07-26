@@ -18,6 +18,7 @@ from .const import (
     CONF_ADDITIONAL_SETTINGS,
     CONF_ADDITIONAL_SETTINGS_IMPORT_FROM_RECORDER,
     CONF_FEATURE_ENTITY,
+    CONF_TARGET_ATTRIBUTE,
     CONF_TARGET_ENTITY,
     ENTITY_KEY_OPERATION_MODE,
     ENTITY_KEY_SAMPLING_STRATEGY,
@@ -56,14 +57,14 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         """Initialize the coordinator."""
         super().__init__(*args, **kwargs)
         # Initialize instance variables to avoid sharing between coordinator instances
-        self.scores: tuple[float, dict[Any, dict[str, float]]] | NoneType = None
+        self.scores: tuple[str, float, dict[Any, Any]] | NoneType = None
         self.entity_registry: list[HAPredictionEntity] = []
         self.dataset: pd.DataFrame | NoneType = None
         self.dataset_size: int = 0
         self.model: Model = Model(self.logger)
         self.operation_mode: OperationMode = OperationMode.TRAINING
         self.training_ready: bool = False
-        self.current_prediction: tuple[str, float] | NoneType = None
+        self.current_prediction: tuple[str | float, float | None] | NoneType = None
 
     async def initialize(self) -> NoneType:
         """Initialize the coordinator."""
@@ -71,8 +72,11 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         await loop.run_in_executor(None, self.read_table)
         if self.dataset is None:
             self.logger.debug("No dataset found on disk.")
-            if self.config_entry.options.get(CONF_ADDITIONAL_SETTINGS, {}).get(
-                CONF_ADDITIONAL_SETTINGS_IMPORT_FROM_RECORDER, True
+            if (
+                CONF_TARGET_ATTRIBUTE not in self.config_entry.data
+                and self.config_entry.options.get(CONF_ADDITIONAL_SETTINGS, {}).get(
+                    CONF_ADDITIONAL_SETTINGS_IMPORT_FROM_RECORDER, True
+                )
             ):
                 self.logger.debug("Importing initial dataset from recorder database.")
                 self.hass.async_create_task(
@@ -80,6 +84,11 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
                 )
                 await loop.run_in_executor(None, self.store_table, self.dataset)
             else:
+                if CONF_TARGET_ATTRIBUTE in self.config_entry.data:
+                    self.logger.debug(
+                        "Recorder import skipped because target attributes are not "
+                        "available in the state query."
+                    )
                 self._initialize_dataframe()
 
     async def _async_update_data(self) -> Any:
@@ -162,8 +171,20 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         new_state = event.data["new_state"]
         old_state = event.data["old_state"]
 
-        # Only act if state actually changed
-        if old_state and new_state and old_state.state != new_state.state:
+        target_attribute = self.config_entry.data.get(CONF_TARGET_ATTRIBUTE)
+        target_attribute_changed = bool(
+            old_state
+            and new_state
+            and target_attribute
+            and new_state.entity_id == self.config_entry.data[CONF_TARGET_ENTITY]
+            and old_state.attributes.get(target_attribute)
+            != new_state.attributes.get(target_attribute)
+        )
+
+        # Target attributes can change without changing the entity state.
+        if old_state and new_state and (
+            old_state.state != new_state.state or target_attribute_changed
+        ):
             self.logger.info("Detecting changed states, storing current instance.")
             # Schedule data collection and prediction in executor to avoid
             # blocking event loop
@@ -247,7 +268,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             for entity in self.entity_registry:
                 entity.notify(MSG_PREDICTION_MADE)
 
-    def _compute_prediction(self) -> tuple[str, float] | None:
+    def _compute_prediction(self) -> tuple[str | float, float | None] | None:
         """
         Compute prediction (blocking operations).
 
@@ -283,6 +304,24 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
 
         return None
 
+    def _get_target_value(self) -> str | float | NoneType:
+        """Get either the configured target state or target attribute."""
+        target_entity = self.config_entry.data[CONF_TARGET_ENTITY]
+        target_attribute = self.config_entry.data.get(CONF_TARGET_ATTRIBUTE)
+        if not target_attribute:
+            return self._get_state_for_entity(target_entity)
+
+        state = self.hass.states.get(entity_id=target_entity)
+        if state is None:
+            return None
+        value = state.attributes.get(target_attribute)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+
     def _get_states_for_entities(
         self, *, include_target: bool | NoneType = True
     ) -> list[str | float | NoneType] | NoneType:
@@ -292,9 +331,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             for e in self.config_entry.data[CONF_FEATURE_ENTITY]
         ]
         if include_target:
-            target_entity_state = self._get_state_for_entity(
-                entity_id=self.config_entry.data[CONF_TARGET_ENTITY]
-            )
+            target_entity_state = self._get_target_value()
             if target_entity_state not in [
                 "unavailable",
                 "unknown",
@@ -365,22 +402,29 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
 
         # Convert DataFrame to numpy array
         data_numpy = self.dataset.copy().to_numpy()
-
         if self.operation_mode == OperationMode.TRAINING:
             await self.hass.async_add_executor_job(self.model.train_eval, data_numpy)
             if self.model.scores is not None:
                 self.scores = self.model.scores
-                self.logger.info(
-                    "Training complete, accuracy: %.02f",
-                    self.scores[0],
-                )
-                for cls in self.model.scores[1]:
-                    self.logger.debug(
-                        "Class %s: p=%f, r=%f, f=%f",
-                        cls,
-                        self.model.scores[1][cls][PRECISION],
-                        self.model.scores[1][cls][RECALL],
-                        self.model.scores[1][cls][F_SCORE],
+                if self.scores[0] == "classification":
+                    self.logger.info(
+                        "Training complete, accuracy: %.02f", self.scores[1]
+                    )
+                    for cls in self.scores[2]:
+                        self.logger.debug(
+                            "Class %s: p=%f, r=%f, f=%f",
+                            cls,
+                            self.scores[2][cls][PRECISION],
+                            self.scores[2][cls][RECALL],
+                            self.scores[2][cls][F_SCORE],
+                        )
+                else:
+                    self.logger.info(
+                        "Training complete, R-squared: %.02f, MAE: %.02f, "
+                        "RMSE: %.02f",
+                        self.scores[1],
+                        self.scores[2]["mae"],
+                        self.scores[2]["rmse"],
                     )
         elif self.operation_mode == OperationMode.PRODUCTION:
             await self.hass.async_add_executor_job(self.model.train_final, data_numpy)

@@ -5,6 +5,7 @@
                 "description": "Configure HA Predictions integration. Select a target entity to predict and feature entities to use for prediction.",
                 "data": {
                     "CONF_TARGET_ENTITY": "Target Entity",
+                    "CONF_TARGET_ATTRIBUTE": "Target Attribute (optional)",
                     "CONF_FEATURE_ENTITY": "Feature Entities"
                 },
                 "data_description": {
@@ -28,7 +29,8 @@
             "unknown": "Unknown error occurred.",
             "target_entity_not_found": "Target entity does not exist in your Home Assistant instance.",
             "target_entity_wrong_domain": "Target entity must be a light, switch, or input_boolean.",
-            "feature_entity_not_found": "One or more feature entities do not exist in your Home Assistant instance."
+            "feature_entity_not_found": "One or more feature entities do not exist in your Home Assistant instance.",
+            "target_attribute_not_found": "The target attribute does not exist on the selected target entity."
         },
         "abort": {
             "already_configured": "This entry is already configured."
