@@ -65,6 +65,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         self.operation_mode: OperationMode = OperationMode.TRAINING
         self.training_ready: bool = False
         self.current_prediction: tuple[str | float, float | None] | NoneType = None
+        self._dirty: bool = False
 
     async def initialize(self) -> NoneType:
         """Initialize the coordinator."""
@@ -93,6 +94,14 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> Any:
         """Update data via library."""
+        await self.async_flush()
+
+    async def async_flush(self) -> None:
+        """Persist collected data when it has changed."""
+        if not self._dirty:
+            return
+        await self.hass.async_add_executor_job(self.store_table, self.dataset)
+        self._dirty = False
 
     def register(self, entity: HAPredictionEntity) -> None:
         """Register an entity to be notified on changes."""
@@ -198,6 +207,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         """
         # Run blocking operations in executor
         await self.hass.async_add_executor_job(self._collect_data)
+        await self.async_flush()
 
         # Notify entities on main event loop
         for entity in self.entity_registry:
@@ -245,11 +255,12 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             try:
                 self.dataset.loc[len(self.dataset)] = xy
                 self.dataset_size = self.dataset.shape[0]
+                self._dirty = True
+                self.logger.debug("Dataset now has %d rows", self.dataset_size)
             except ValueError:
                 self.logger.exception(
                     "Error adding data (%s) to dataset: %s", xy, self.dataset
                 )
-            self.logger.info(self.dataset)
         self.training_ready = self.dataset_size >= MIN_DATASET_SIZE
 
     async def _async_make_prediction(self) -> None:

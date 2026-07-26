@@ -56,7 +56,7 @@ async def async_setup_entry(
         hass,
         logger=LOGGER,
         name=DOMAIN,
-        update_interval=timedelta(hours=1),
+        update_interval=timedelta(minutes=5),
     )
 
     entities_for_subscription = [entry.data[CONF_TARGET_ENTITY]] + entry.data[
@@ -111,6 +111,7 @@ async def async_unload_entry(
     entry: HAPredictionConfigEntry,
 ) -> bool:
     """Handle removal of an entry."""
+    await entry.runtime_data.coordinator.async_flush()
     [unsub() for unsub in entry.runtime_data.unsubscribe]
     entry.runtime_data.coordinator.remove_listeners()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
