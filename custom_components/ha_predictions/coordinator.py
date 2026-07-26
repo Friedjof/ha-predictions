@@ -15,11 +15,14 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from sqlalchemy import text
 
 from .const import (
+    ALGORITHM_DECISION_TREE,
+    ALGORITHM_LINEAR,
     CONF_ADDITIONAL_SETTINGS,
     CONF_ADDITIONAL_SETTINGS_IMPORT_FROM_RECORDER,
     CONF_FEATURE_ENTITY,
     CONF_TARGET_ATTRIBUTE,
     CONF_TARGET_ENTITY,
+    ENTITY_KEY_ALGORITHM,
     ENTITY_KEY_OPERATION_MODE,
     ENTITY_KEY_SAMPLING_STRATEGY,
     LOGGER,
@@ -33,9 +36,9 @@ from .const import (
     SAMPLING_SMOTE,
     OperationMode,
 )
-from .ml.const import F_SCORE, PRECISION, RECALL
+from .ml.const import F_SCORE, PRECISION, RECALL, Algorithm, SamplingStrategy
 from .ml.exceptions import ModelNotTrainedError
-from .ml.model import Model, SamplingStrategy
+from .ml.model import Model
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -126,6 +129,10 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         """Get the current option for a given key."""
         if key == ENTITY_KEY_OPERATION_MODE:
             return self.operation_mode.name
+        if key == ENTITY_KEY_ALGORITHM:
+            if self.model.algorithm == Algorithm.DECISION_TREE:
+                return ALGORITHM_DECISION_TREE
+            return ALGORITHM_LINEAR
         if key == ENTITY_KEY_SAMPLING_STRATEGY:
             if "sampling" not in self.model.transformations:
                 return SAMPLING_NONE
@@ -146,6 +153,8 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         """Change the selected option."""
         if key == ENTITY_KEY_OPERATION_MODE:
             self._set_operation_mode(OperationMode[value])
+        elif key == ENTITY_KEY_ALGORITHM:
+            self._set_algorithm(value)
         elif key == ENTITY_KEY_SAMPLING_STRATEGY:
             self._set_sampling_strategy(value)
 
@@ -174,6 +183,18 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             self.model.transformations.pop("sampling", None)
             [e.notify(MSG_TRAINING_SETTINGS_CHANGED) for e in self.entity_registry]
             self.logger.info("Sampling disabled.")
+
+    def _set_algorithm(self, algorithm: str) -> None:
+        """Set the machine-learning algorithm."""
+        selected = (
+            Algorithm.DECISION_TREE
+            if algorithm == ALGORITHM_DECISION_TREE
+            else Algorithm.LINEAR
+        )
+        if selected != self.model.algorithm:
+            self.model.algorithm = selected
+            [e.notify(MSG_TRAINING_SETTINGS_CHANGED) for e in self.entity_registry]
+            self.logger.info("Algorithm changed to %s.", algorithm)
 
     def state_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle state changes of monitored entities."""
@@ -413,8 +434,11 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
 
         # Convert DataFrame to numpy array
         data_numpy = self.dataset.copy().to_numpy()
+        feature_names = list(self.config_entry.data[CONF_FEATURE_ENTITY])
         if self.operation_mode == OperationMode.TRAINING:
-            await self.hass.async_add_executor_job(self.model.train_eval, data_numpy)
+            await self.hass.async_add_executor_job(
+                self.model.train_eval, data_numpy, feature_names
+            )
             if self.model.scores is not None:
                 self.scores = self.model.scores
                 if self.scores[0] == "classification":
@@ -438,7 +462,9 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
                         self.scores[2]["rmse"],
                     )
         elif self.operation_mode == OperationMode.PRODUCTION:
-            await self.hass.async_add_executor_job(self.model.train_final, data_numpy)
+            await self.hass.async_add_executor_job(
+                self.model.train_final, data_numpy, feature_names
+            )
         else:
             self.logger.error("Unknown operation mode: %s", self.operation_mode)
             return

@@ -9,6 +9,9 @@ from homeassistant.const import EntityCategory
 from propcache import cached_property
 
 from .const import (
+    ALGORITHM_DECISION_TREE,
+    ALGORITHM_LINEAR,
+    ENTITY_KEY_ALGORITHM,
     ENTITY_KEY_OPERATION_MODE,
     ENTITY_KEY_SAMPLING_STRATEGY,
     SAMPLING_NONE,
@@ -35,6 +38,16 @@ async def async_setup_entry(
     """Set up the select platform."""
     async_add_entities(
         [
+            HAPredictionSelectEntity(
+                coordinator=entry.runtime_data.coordinator,
+                entity_description=HAPredictionSelectEntityDescription(
+                    key=ENTITY_KEY_ALGORITHM,
+                    name="Algorithm",
+                    icon="mdi:family-tree",
+                    options=[ALGORITHM_LINEAR, ALGORITHM_DECISION_TREE],
+                    entity_category=EntityCategory.CONFIG,
+                ),
+            ),
             HAPredictionSelectEntity(
                 coordinator=entry.runtime_data.coordinator,
                 entity_description=HAPredictionSelectEntityDescription(

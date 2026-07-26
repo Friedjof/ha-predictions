@@ -35,10 +35,14 @@ ENTITY_KEY_STORE_INSTANCE = "store_instance"
 ENTITY_KEY_RUN_TRAINING = "run_training"
 ENTITY_KEY_ZSCORES_SWITCH = "zscores_switch"
 ENTITY_KEY_SAMPLING_STRATEGY = "sampling_strategy"
+ENTITY_KEY_ALGORITHM = "algorithm"
 
 SAMPLING_NONE = "None"
 SAMPLING_RANDOM = "Random oversampling"
 SAMPLING_SMOTE = "SMOTE"
+
+ALGORITHM_LINEAR = "Linear"
+ALGORITHM_DECISION_TREE = "Decision Tree"
 
 
 class OperationMode(Enum):

@@ -5,8 +5,10 @@ from types import NoneType
 from typing import Any
 
 import numpy as np
+from sklearn.tree import export_text
 
-from .const import SamplingStrategy
+from .classifiers import DecisionTreeClassifier
+from .const import Algorithm, SamplingStrategy
 from .evaluation import (
     accuracy,
     mae,
@@ -16,7 +18,7 @@ from .evaluation import (
 )
 from .exceptions import ModelNotTrainedError
 from .logistic_regression import LogisticRegression
-from .regressors import LinearRegressor
+from .regressors import DecisionTreeRegressor, LinearRegressor
 from .sampling import random_oversample, smote
 
 
@@ -29,13 +31,24 @@ class Model:
         self.scores: tuple[str, float, dict[Any, Any]] | NoneType = None
         self.factors: dict[int, Any] = {}
         self.model_eval: (
-            LogisticRegression | LinearRegressor | None
+            LogisticRegression
+            | DecisionTreeClassifier
+            | LinearRegressor
+            | DecisionTreeRegressor
+            | None
         ) = None
         self.model_final: (
-            LogisticRegression | LinearRegressor | None
+            LogisticRegression
+            | DecisionTreeClassifier
+            | LinearRegressor
+            | DecisionTreeRegressor
+            | None
         ) = None
         self.target_column_idx: int | None = None
         self.prediction_ready: bool = False
+        self.algorithm: Algorithm = Algorithm.LINEAR
+        self.feature_names: list[str] = []
+        self.model_description: str | None = None
         self.transformations: dict[str, dict[str, Any]] = {
             "zscores": {},
             "sampling": {"type": SamplingStrategy.SMOTE, "k_neighbors": 5},
@@ -121,6 +134,7 @@ class Model:
     def train_final(
         self,
         data: np.ndarray,
+        feature_names: list[str] | None = None,
     ) -> None:
         """
         Train the final model.
@@ -128,6 +142,7 @@ class Model:
         Args:
             data: Numpy array with features and target (not encoded).
                   Last column is assumed to be the target column.
+            feature_names: Optional names used to describe decision-tree rules.
 
         """
         # Target column is the last column
@@ -139,6 +154,8 @@ class Model:
         # Create a new array with float dtype to avoid object dtype issues
         data_encoded, self.factors = self._factorize(data)
         is_regression = self.target_column_idx not in self.factors
+        if not is_regression:
+            self._validate_binary_target(self.factors)
 
         if not is_regression:
             data_encoded = self._apply_sampling(data_encoded)
@@ -153,19 +170,26 @@ class Model:
             self.transformations["zscores"]["stds"] = stds
 
         # Train model
+        self.feature_names = feature_names or [
+            f"feature_{idx}" for idx in range(x_train.shape[1])
+        ]
         self.model_final = self._build_model(is_regression=is_regression)
         self.logger.debug("Training of final model begins")
         self.model_final.fit(x_train, y_train)
+        self._update_model_description(self.model_final)
         self.logger.debug("Training ends, model: %s", str(self.model_final))
         self.prediction_ready = True
 
-    def train_eval(self, data: np.ndarray) -> NoneType:
+    def train_eval(
+        self, data: np.ndarray, feature_names: list[str] | None = None
+    ) -> NoneType:
         """
         Train and evaluate the model with train/test split.
 
         Args:
             data: Numpy array with features and target (not encoded).
                   Last column is assumed to be the target column.
+            feature_names: Optional names used to describe decision-tree rules.
 
         """
         self.logger.info("Starting training for evaluation with data: %s", str(data))
@@ -178,6 +202,8 @@ class Model:
         # Create a new array with float dtype to avoid object dtype issues
         data_encoded, factors = self._factorize(filtered_arr)
         is_regression = self.target_column_idx not in factors
+        if not is_regression:
+            self._validate_binary_target(factors)
 
         # train/test split in pure numpy with stratification
         rng = np.random.Generator(np.random.PCG64())
@@ -238,9 +264,13 @@ class Model:
             (means, stds, x_train) = self._apply_normalization(x_train)
             x_test = (x_test - means) / stds
 
+        self.feature_names = feature_names or [
+            f"feature_{idx}" for idx in range(x_train.shape[1])
+        ]
         self.model_eval = self._build_model(is_regression=is_regression)
         self.logger.debug("Training begins")
         self.model_eval.fit(x_train, y_train)
+        self._update_model_description(self.model_eval)
         self.logger.debug("Training ends, model: %s", str(self.model_eval))
 
         y_pred = self.model_eval.predict(x_test)[0]
@@ -274,11 +304,48 @@ class Model:
 
     def _build_model(
         self, *, is_regression: bool
-    ) -> LogisticRegression | LinearRegressor:
+    ) -> (
+        LogisticRegression
+        | DecisionTreeClassifier
+        | LinearRegressor
+        | DecisionTreeRegressor
+    ):
         """Build the selected classifier or regressor."""
         if is_regression:
+            if self.algorithm == Algorithm.DECISION_TREE:
+                return DecisionTreeRegressor()
             return LinearRegressor()
+        if self.algorithm == Algorithm.DECISION_TREE:
+            return DecisionTreeClassifier()
         return LogisticRegression()
+
+    def _update_model_description(
+        self,
+        model: (
+            LogisticRegression
+            | DecisionTreeClassifier
+            | LinearRegressor
+            | DecisionTreeRegressor
+        ),
+    ) -> None:
+        """Expose decision-tree rules and clear stale descriptions."""
+        if isinstance(model, (DecisionTreeClassifier, DecisionTreeRegressor)):
+            self.model_description = export_text(
+                model.estimator, feature_names=self.feature_names
+            )
+        else:
+            self.model_description = None
+
+    def _validate_binary_target(self, factors: dict[int, Any]) -> None:
+        """Reject categorical targets unsupported by binary evaluation."""
+        target_values = factors.get(self.target_column_idx)
+        if target_values is not None and len(target_values) > 2:  # noqa: PLR2004
+            self.logger.warning(
+                "Only binary categorical targets are supported, found %d classes.",
+                len(target_values),
+            )
+            msg = "Only binary categorical targets are supported"
+            raise ValueError(msg)
 
     def _factorize(self, data: np.ndarray) -> tuple[np.ndarray, dict]:
         """

@@ -3,6 +3,13 @@
 from enum import Enum
 
 
+class Algorithm(Enum):
+    """Enumeration of supported machine-learning algorithms."""
+
+    LINEAR = "linear"
+    DECISION_TREE = "decision_tree"
+
+
 class SamplingStrategy(Enum):
     """Enumeration of sampling strategies."""
 

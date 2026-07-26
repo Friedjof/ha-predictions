@@ -19,7 +19,7 @@ ha_predictions_path = (
 )
 sys.path.insert(0, str(ha_predictions_path))
 
-from ml.const import SamplingStrategy  # noqa: E402
+from ml.const import Algorithm, SamplingStrategy  # noqa: E402
 from ml.exceptions import ModelNotTrainedError  # noqa: E402
 from ml.model import Model  # noqa: E402
 from test_fixtures import MockLogger  # noqa: E402
@@ -177,6 +177,48 @@ class TestModelPredictProbabilities:
 
         # Predictions at extremes should be different classes
         assert label_low != label_high
+
+
+class TestDecisionTreeModel:
+    """Test decision-tree classification through the model manager."""
+
+    def test_train_predict_and_describe_tree(self) -> None:
+        """Train a decision tree and expose predictions and readable rules."""
+        model = Model(MockLogger())
+        model.algorithm = Algorithm.DECISION_TREE
+        data = pd.DataFrame(
+            {
+                "temperature": [10, 11, 12, 13, 20, 21, 22, 23],
+                "target": ["off"] * 4 + ["on"] * 4,
+            }
+        ).to_numpy()
+
+        model.train_final(data, ["temperature"])
+        result = model.predict(np.array([[22]]))
+
+        assert result is not None
+        assert result[0] == "on"
+        assert 0.0 <= result[1] <= 1.0
+        assert model.model_description is not None
+        assert "temperature" in model.model_description
+
+    def test_train_eval_returns_classification_scores(self) -> None:
+        """Keep the evaluation result shape consistent with linear models."""
+        model = Model(MockLogger())
+        model.algorithm = Algorithm.DECISION_TREE
+        data = pd.DataFrame(
+            {
+                "feature": list(range(20)),
+                "target": ["off"] * 10 + ["on"] * 10,
+            }
+        ).to_numpy()
+
+        model.train_eval(data, ["feature"])
+
+        assert model.scores is not None
+        assert model.scores[0] == "classification"
+        assert 0.0 <= model.scores[1] <= 1.0
+        assert isinstance(model.scores[2], dict)
 
 
 class TestModelInitialization:
@@ -701,17 +743,23 @@ class TestModelEdgeCases:
 class TestModelRegression:
     """Test numeric target regression."""
 
-    def test_train_final_predicts_numeric_target(self) -> None:
-        """Train the linear regressor and return a numeric prediction."""
+    @pytest.mark.parametrize(
+        "algorithm", [Algorithm.LINEAR, Algorithm.DECISION_TREE]
+    )
+    def test_train_final_predicts_numeric_target(self, algorithm: Algorithm) -> None:
+        """Use the selected regression algorithm for numeric predictions."""
         model = Model(MockLogger())
+        model.algorithm = algorithm
         data = np.array([[value, value * 2.0] for value in range(1, 11)])
 
-        model.train_final(data)
+        model.train_final(data, ["feature"])
         result = model.predict(np.array([[6.0]]))
 
         assert result is not None
         assert isinstance(result[0], float)
         assert result[1] is None
+        if algorithm == Algorithm.DECISION_TREE:
+            assert model.model_description is not None
 
     def test_train_eval_returns_regression_scores(self) -> None:
         """Report R-squared, MAE and RMSE for numeric targets."""

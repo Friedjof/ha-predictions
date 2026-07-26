@@ -224,5 +224,7 @@ class PredictionPerformanceSensor(HAPredictionEntity, SensorEntity):
                         ret_key = f"{outer_key}_{inner_key}"
                         ret[ret_key] = details[outer_key][inner_key]
                 ret["data"] = details
+            if self.coordinator.model.model_description is not None:
+                ret["tree_rules"] = self.coordinator.model.model_description
             return ret
         return {}
