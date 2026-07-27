@@ -39,13 +39,28 @@
     },
     "options": {
         "error": {
-            "target_entity_as_feature": "The target entity cannot also be selected as a feature entity."
+            "target_entity_as_feature": "The target entity cannot also be selected as a feature entity.",
+            "filter_weekdays_empty": "Select at least one weekday.",
+            "filter_date_range_invalid": "The start date must not be after the end date."
         },
         "step": {
             "init": {
-                "description": "Update feature entities for prediction. Note: Changing feature entities will reset your training data.",
+                "description": "Update feature entities and training dataset filters. Filter changes mark the current dataset for rebuild but do not delete it automatically. Including production data can create prediction feedback loops.",
                 "data": {
-                    "CONF_FEATURE_ENTITY": "Feature Entities"
+                    "CONF_FEATURE_ENTITY": "Feature Entities",
+                    "filter_date_from": "Date from (optional)",
+                    "filter_date_to": "Date to (optional, inclusive)",
+                    "filter_time_from": "Daily time from",
+                    "filter_time_to": "Daily time to",
+                    "filter_weekdays": "Weekdays",
+                    "filter_min_interval": "Minimum interval between rows",
+                    "filter_require_complete": "Require complete rows",
+                    "filter_include_production": "Include production data (feedback-loop risk)"
+                },
+                "data_description": {
+                    "filter_time_from": "A range where the start is later than the end spans midnight.",
+                    "filter_min_interval": "Minimum number of seconds between accepted training rows. Zero keeps every matching event.",
+                    "filter_include_production": "Disabled by default. Enabling this may train the model on states caused by its own predictions."
                 }
             }
         }

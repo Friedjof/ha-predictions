@@ -743,9 +743,7 @@ class TestModelEdgeCases:
 class TestModelRegression:
     """Test numeric target regression."""
 
-    @pytest.mark.parametrize(
-        "algorithm", [Algorithm.LINEAR, Algorithm.DECISION_TREE]
-    )
+    @pytest.mark.parametrize("algorithm", [Algorithm.LINEAR, Algorithm.DECISION_TREE])
     def test_train_final_predicts_numeric_target(self, algorithm: Algorithm) -> None:
         """Use the selected regression algorithm for numeric predictions."""
         model = Model(MockLogger())

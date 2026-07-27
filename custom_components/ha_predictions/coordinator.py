@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+import json
 from contextlib import contextmanager
+from datetime import UTC, date, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.recorder import get_instance
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -23,6 +27,9 @@ from .const import (
     CONF_FEATURE_ENTITY,
     CONF_TARGET_ATTRIBUTE,
     CONF_TARGET_ENTITY,
+    DEFAULT_FILTER_TIME_FROM,
+    DEFAULT_FILTER_TIME_TO,
+    DEFAULT_FILTER_WEEKDAYS,
     DOMAIN,
     ENTITY_KEY_ALGORITHM,
     ENTITY_KEY_OPERATION_MODE,
@@ -34,10 +41,25 @@ from .const import (
     MSG_PREDICTION_MADE,
     MSG_TRAINING_DONE,
     MSG_TRAINING_SETTINGS_CHANGED,
+    OPT_FILTER_DATE_FROM,
+    OPT_FILTER_DATE_TO,
+    OPT_FILTER_INCLUDE_PRODUCTION,
+    OPT_FILTER_MIN_INTERVAL,
+    OPT_FILTER_REQUIRE_COMPLETE,
+    OPT_FILTER_TIME_FROM,
+    OPT_FILTER_TIME_TO,
+    OPT_FILTER_WEEKDAYS,
     SAMPLING_NONE,
     SAMPLING_RANDOM,
     SAMPLING_SMOTE,
     OperationMode,
+)
+from .history import (
+    DATASET_TIMESTAMP,
+    DatasetFilterSettings,
+    HistoryPivotResult,
+    filter_reason,
+    pivot_state_history,
 )
 from .ml.const import F_SCORE, PRECISION, RECALL, Algorithm, SamplingStrategy
 from .ml.exceptions import ModelNotTrainedError
@@ -71,7 +93,15 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         self.operation_mode: OperationMode = OperationMode.TRAINING
         self.training_ready: bool = False
         self.current_prediction: tuple[str | float, float | None] | NoneType = None
+        self.last_training: datetime | None = None
+        self.training_dataset_size: int | None = None
+        self.production_rows_filtered: int = 0
+        self.dataset_filter_counts: dict[str, int] = {}
+        self.applied_dataset_filter_signature: str | None = None
+        self._last_collected_timestamp: float | None = None
+        self._dataset_filter_settings_dirty = False
         self._dirty: bool = False
+        self._dataset_lock = asyncio.Lock()
         self._settings_store: Store[dict[str, Any]] | None = None
 
     async def initialize(self) -> NoneType:
@@ -143,6 +173,19 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         else:
             self.model.transformations.pop("zscores", None)
 
+        last_training = settings.get("last_training")
+        if last_training:
+            try:
+                self.last_training = datetime.fromisoformat(last_training)
+            except (TypeError, ValueError):
+                self.last_training = None
+        self.training_dataset_size = settings.get("training_dataset_size")
+        self.production_rows_filtered = settings.get("production_rows_filtered", 0)
+        self.dataset_filter_counts = settings.get("dataset_filter_counts", {})
+        self.applied_dataset_filter_signature = settings.get(
+            "applied_dataset_filter_signature"
+        )
+
     async def _async_save_settings(self) -> None:
         """Persist model and operation settings."""
         if self._settings_store is None:
@@ -153,6 +196,17 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
                 "algorithm": self.model.algorithm.value,
                 "sampling_strategy": self.get_option(ENTITY_KEY_SAMPLING_STRATEGY),
                 "zscores": "zscores" in self.model.transformations,
+                "last_training": (
+                    self.last_training.isoformat()
+                    if self.last_training is not None
+                    else None
+                ),
+                "training_dataset_size": self.training_dataset_size,
+                "production_rows_filtered": self.production_rows_filtered,
+                "dataset_filter_counts": self.dataset_filter_counts,
+                "applied_dataset_filter_signature": (
+                    self.applied_dataset_filter_signature
+                ),
             }
         )
 
@@ -179,6 +233,109 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         """Remove all listeners."""
         self.entity_registry.clear()
 
+    @property
+    def model_trained(self) -> bool:
+        """Return whether the current in-memory model has been trained."""
+        if self.operation_mode == OperationMode.PRODUCTION:
+            return self.model.prediction_ready
+        return self.model.model_eval is not None
+
+    @property
+    def model_is_stale(self) -> bool:
+        """Return whether the dataset changed after the latest training."""
+        return (
+            self.training_dataset_size is None
+            or self.training_dataset_size != self.dataset_size
+            or self.dataset_rebuild_required
+        )
+
+    @property
+    def dataset_time_range(self) -> tuple[str | None, str | None]:
+        """Return the first and last valid timestamps in the dataset."""
+        if self.dataset is None or DATASET_TIMESTAMP not in self.dataset.columns:
+            return (None, None)
+        timestamps = pd.to_datetime(
+            self.dataset[DATASET_TIMESTAMP], errors="coerce", utc=True
+        ).dropna()
+        if timestamps.empty:
+            return (None, None)
+        return (timestamps.min().isoformat(), timestamps.max().isoformat())
+
+    @property
+    def automatic_collection_enabled(self) -> bool:
+        """Return whether state events automatically create training rows."""
+        return (
+            self.operation_mode == OperationMode.TRAINING
+            or self.dataset_filter_settings.include_production
+        )
+
+    @property
+    def dataset_filter_settings(self) -> DatasetFilterSettings:
+        """Return normalized dataset filters from config entry options."""
+        options = self.config_entry.options
+        date_from = options.get(OPT_FILTER_DATE_FROM)
+        date_to = options.get(OPT_FILTER_DATE_TO)
+        return DatasetFilterSettings(
+            date_from=date.fromisoformat(str(date_from)) if date_from else None,
+            date_to=date.fromisoformat(str(date_to)) if date_to else None,
+            time_from=time.fromisoformat(
+                str(options.get(OPT_FILTER_TIME_FROM, DEFAULT_FILTER_TIME_FROM))
+            ),
+            time_to=time.fromisoformat(
+                str(options.get(OPT_FILTER_TIME_TO, DEFAULT_FILTER_TIME_TO))
+            ),
+            weekdays=frozenset(
+                int(day)
+                for day in options.get(OPT_FILTER_WEEKDAYS, DEFAULT_FILTER_WEEKDAYS)
+            ),
+            minimum_interval=float(options.get(OPT_FILTER_MIN_INTERVAL, 0)),
+            require_complete=options.get(OPT_FILTER_REQUIRE_COMPLETE, True),
+            include_production=options.get(OPT_FILTER_INCLUDE_PRODUCTION, False),
+        )
+
+    @property
+    def dataset_filter_config(self) -> dict[str, Any]:
+        """Return serializable active dataset filter values."""
+        settings = self.dataset_filter_settings
+        return {
+            "date_from": settings.date_from.isoformat() if settings.date_from else None,
+            "date_to": settings.date_to.isoformat() if settings.date_to else None,
+            "time_from": settings.time_from.isoformat(),
+            "time_to": settings.time_to.isoformat(),
+            "weekdays": sorted(settings.weekdays),
+            "minimum_interval": settings.minimum_interval,
+            "require_complete": settings.require_complete,
+            "include_production": settings.include_production,
+            "timezone": self.hass.config.time_zone,
+        }
+
+    @property
+    def current_dataset_filter_signature(self) -> str:
+        """Return a stable representation of active filter settings."""
+        return json.dumps(self.dataset_filter_config, sort_keys=True)
+
+    @property
+    def applied_dataset_filters(self) -> dict[str, Any] | None:
+        """Return filters used for the most recent recorder rebuild."""
+        if self.applied_dataset_filter_signature is None:
+            return None
+        try:
+            return json.loads(self.applied_dataset_filter_signature)
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    @property
+    def dataset_rebuild_required(self) -> bool:
+        """Return whether stored rows predate the active filter configuration."""
+        return bool(
+            self.dataset is not None
+            and (
+                DATASET_TIMESTAMP not in self.dataset.columns
+                or self.applied_dataset_filter_signature
+                != self.current_dataset_filter_signature
+            )
+        )
+
     def set_zscores(self, *, value: bool) -> NoneType:
         """En- or disable the use of zscores for training."""
         if value and "zscores" not in self.model.transformations:
@@ -192,7 +349,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             self.logger.info("Z-Score normalization disabled.")
             self._schedule_settings_save()
 
-    def get_option(self, key: str) -> str | NoneType:
+    def get_option(self, key: str) -> str | NoneType:  # noqa: PLR0911
         """Get the current option for a given key."""
         if key == ENTITY_KEY_OPERATION_MODE:
             return self.operation_mode.name
@@ -294,27 +451,37 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         )
 
         # Target attributes can change without changing the entity state.
-        if old_state and new_state and (
-            old_state.state != new_state.state or target_attribute_changed
+        if (
+            old_state
+            and new_state
+            and (old_state.state != new_state.state or target_attribute_changed)
         ):
-            self.logger.info("Detecting changed states, storing current instance.")
-            # Schedule data collection and prediction in executor to avoid
-            # blocking event loop
+            self.logger.info("Detected changed state.")
             self.hass.async_create_task(self._async_collect_and_predict())
 
     async def _async_collect_and_predict(self) -> None:
         """
-        Collect data and make prediction.
+        Collect training data when enabled and make production predictions.
 
         Runs blocking operations in executor to avoid blocking event loop.
         """
-        # Run blocking operations in executor
-        await self.hass.async_add_executor_job(self._collect_data)
-        await self.async_flush()
-
-        # Notify entities on main event loop
-        for entity in self.entity_registry:
-            entity.notify(MSG_DATASET_CHANGED)
+        if self.automatic_collection_enabled:
+            async with self._dataset_lock:
+                collected = await self.hass.async_add_executor_job(
+                    partial(self._collect_data, manual=False)
+                )
+                if collected:
+                    await self.async_flush()
+                    if self._dataset_filter_settings_dirty:
+                        await self._async_save_settings()
+                        self._dataset_filter_settings_dirty = False
+            if collected:
+                for entity in self.entity_registry:
+                    entity.notify(MSG_DATASET_CHANGED)
+        else:
+            self.logger.debug(
+                "Skipping automatic data collection while production mode is active."
+            )
 
         # Make prediction if model is ready
         if (
@@ -335,14 +502,26 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
 
         This is an async wrapper that runs blocking operations in executor.
         """
-        # Run blocking operations in executor
-        await self.hass.async_add_executor_job(self._collect_data)
+        async with self._dataset_lock:
+            await self.hass.async_add_executor_job(
+                partial(self._collect_data, manual=True)
+            )
+            await self.async_flush()
+            if self._dataset_filter_settings_dirty:
+                await self._async_save_settings()
+                self._dataset_filter_settings_dirty = False
 
-        # Notify entities on main event loop
         for entity in self.entity_registry:
             entity.notify(MSG_DATASET_CHANGED)
 
-    def _collect_data(self) -> None:
+        if (
+            self.operation_mode == OperationMode.PRODUCTION
+            and self.training_ready
+            and not self.model.prediction_ready
+        ):
+            await self.train()
+
+    def _collect_data(self, *, manual: bool = False) -> bool:
         """
         Collect the current state (blocking operations).
 
@@ -353,26 +532,49 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             self.logger.info(
                 "Target entity not available or not known, skipping data collection."
             )
-            return
+            return False
         if self.dataset is None:
             self._initialize_dataframe()
-        if self.dataset is not None and xy[-1] not in [
-            "unavailable",
-            "unknown",
-            "Unavailable",
-            "Unknown",
-            None,
-        ]:
+        entities = [
+            *self.config_entry.data[CONF_FEATURE_ENTITY],
+            self.config_entry.data[CONF_TARGET_ENTITY],
+        ]
+        now = datetime.now(UTC)
+        values = dict(zip(entities, xy, strict=True))
+        if not manual:
+            reason = filter_reason(
+                now.timestamp(),
+                values,
+                entities,
+                target_entity=self.config_entry.data[CONF_TARGET_ENTITY],
+                operation_mode=self.operation_mode.value,
+                settings=self.dataset_filter_settings,
+                local_timezone=ZoneInfo(self.hass.config.time_zone),
+                last_accepted_timestamp=self._last_collected_timestamp,
+            )
+            if reason is not None:
+                self.logger.debug("Dataset filter skipped live row: %s", reason)
+                return False
+
+        if self.dataset is not None:
             try:
-                self.dataset.loc[len(self.dataset)] = xy
+                if DATASET_TIMESTAMP not in self.dataset.columns:
+                    self.dataset.insert(0, DATASET_TIMESTAMP, pd.NA)
+                self.dataset.loc[len(self.dataset)] = {
+                    DATASET_TIMESTAMP: now.isoformat(),
+                    **values,
+                }
                 self.dataset_size = self.dataset.shape[0]
+                self._last_collected_timestamp = now.timestamp()
                 self._dirty = True
                 self.logger.debug("Dataset now has %d rows", self.dataset_size)
             except ValueError:
                 self.logger.exception(
                     "Error adding data (%s) to dataset: %s", xy, self.dataset
                 )
+                return False
         self.training_ready = self.dataset_size >= MIN_DATASET_SIZE
+        return True
 
     async def _async_make_prediction(self) -> None:
         """
@@ -410,10 +612,13 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         """Initialize empty dataframe for dataset."""
         self.dataset = pd.DataFrame(
             columns=[
+                DATASET_TIMESTAMP,
                 *list(self.config_entry.data[CONF_FEATURE_ENTITY]),
                 self.config_entry.data[CONF_TARGET_ENTITY],
             ]
         )
+        self.applied_dataset_filter_signature = self.current_dataset_filter_signature
+        self._dataset_filter_settings_dirty = True
         self.logger.debug("Initialized new dataframe: %s", str(self.dataset))
 
     def _get_state_for_entity(self, entity_id: str) -> str | float | NoneType:
@@ -478,6 +683,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
                 )
                 self.dataset_size = self.dataset.shape[0]
                 self.training_ready = self.dataset_size >= MIN_DATASET_SIZE
+                self._update_last_collected_timestamp()
                 self.logger.debug("Read dataset with %d instances.", self.dataset_size)
                 [e.notify(MSG_DATASET_CHANGED) for e in self.entity_registry]
             except (OSError, PermissionError):
@@ -491,6 +697,17 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
                     str(self.config_entry.runtime_data.datafile),
                 )
 
+    def _update_last_collected_timestamp(self) -> None:
+        """Update minimum-interval tracking from the current dataset."""
+        self._last_collected_timestamp = None
+        if self.dataset is None or DATASET_TIMESTAMP not in self.dataset.columns:
+            return
+        timestamps = pd.to_datetime(
+            self.dataset[DATASET_TIMESTAMP], errors="coerce", utc=True
+        ).dropna()
+        if not timestamps.empty:
+            self._last_collected_timestamp = timestamps.max().timestamp()
+
     def store_table(self, df: pd.DataFrame | NoneType) -> None:
         """Store dataset to file."""
         try:
@@ -498,7 +715,10 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
                 parents=True, exist_ok=True
             )
             if df is not None:
-                df.to_csv(self.config_entry.runtime_data.datafile, index=False)
+                datafile = self.config_entry.runtime_data.datafile
+                temporary_file = datafile.with_suffix(f"{datafile.suffix}.tmp")
+                df.to_csv(temporary_file, index=False)
+                temporary_file.replace(datafile)
         except (OSError, PermissionError):
             self.logger.exception(
                 "Failed to store dataset to file %s",
@@ -523,8 +743,12 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             return
 
         # Convert DataFrame to numpy array
-        data_numpy = self.dataset.copy().to_numpy()
         feature_names = list(self.config_entry.data[CONF_FEATURE_ENTITY])
+        model_columns = [
+            *feature_names,
+            self.config_entry.data[CONF_TARGET_ENTITY],
+        ]
+        data_numpy = self.dataset.loc[:, model_columns].to_numpy()
         if self.operation_mode == OperationMode.TRAINING:
             await self.hass.async_add_executor_job(
                 self.model.train_eval, data_numpy, feature_names
@@ -545,8 +769,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
                         )
                 else:
                     self.logger.info(
-                        "Training complete, R-squared: %.02f, MAE: %.02f, "
-                        "RMSE: %.02f",
+                        "Training complete, R-squared: %.02f, MAE: %.02f, RMSE: %.02f",
                         self.scores[1],
                         self.scores[2]["mae"],
                         self.scores[2]["rmse"],
@@ -558,6 +781,9 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         else:
             self.logger.error("Unknown operation mode: %s", self.operation_mode)
             return
+        self.last_training = datetime.now(UTC)
+        self.training_dataset_size = self.dataset_size
+        await self._async_save_settings()
         [e.notify(MSG_TRAINING_DONE) for e in self.entity_registry]
         if self.operation_mode == OperationMode.PRODUCTION:
             # Update prediction after training
@@ -565,35 +791,137 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
 
     async def _extract_initial_dataset_from_recorder(self) -> NoneType:
         """Extract initial dataset from recorder history."""
-        dburl = get_instance(self.hass).db_url
-        self.logger.info("Extracting initial dataset from recorder database: %s", dburl)
+        async with self._dataset_lock:
+            dataset, filter_counts = await self._async_extract_recorder_dataset()
+            self.dataset = dataset
+            self.dataset_size = dataset.shape[0]
+            self.dataset_filter_counts = filter_counts
+            self.production_rows_filtered = filter_counts.get("production", 0)
+            self.applied_dataset_filter_signature = (
+                self.current_dataset_filter_signature
+            )
+            self._update_last_collected_timestamp()
+            self.training_ready = self.dataset_size >= MIN_DATASET_SIZE
+            self._dirty = True
+            await self.async_flush()
+            await self._async_save_settings()
+            self._dataset_filter_settings_dirty = False
+        for entity in self.entity_registry:
+            entity.notify(MSG_DATASET_CHANGED)
+        if self.operation_mode == OperationMode.PRODUCTION and self.training_ready:
+            await self.train()
 
+    async def async_rebuild_dataset(self) -> None:
+        """Replace the dataset with production-filtered recorder history."""
+        if CONF_TARGET_ATTRIBUTE in self.config_entry.data:
+            self.logger.warning(
+                "Recorder rebuild is unavailable for target attributes."
+            )
+            return
+
+        self.logger.info("Rebuilding training dataset from recorder history.")
+        async with self._dataset_lock:
+            dataset, filter_counts = await self._async_extract_recorder_dataset()
+            self.dataset = dataset
+            self.dataset_size = dataset.shape[0]
+            self.dataset_filter_counts = filter_counts
+            self.production_rows_filtered = filter_counts.get("production", 0)
+            self.applied_dataset_filter_signature = (
+                self.current_dataset_filter_signature
+            )
+            self._update_last_collected_timestamp()
+            self.training_ready = self.dataset_size >= MIN_DATASET_SIZE
+            self.training_dataset_size = None
+            self._dirty = True
+            await self.async_flush()
+
+        self.logger.info(
+            "Rebuilt dataset with %d rows; filter counts: %s.",
+            self.dataset_size,
+            filter_counts,
+        )
+        for entity in self.entity_registry:
+            entity.notify(MSG_DATASET_CHANGED)
+
+        if self.operation_mode == OperationMode.PRODUCTION and self.training_ready:
+            self.logger.info("Retraining production model after dataset rebuild.")
+            await self.train()
+        else:
+            await self._async_save_settings()
+
+    async def _async_extract_recorder_dataset(
+        self,
+    ) -> tuple[pd.DataFrame, dict[str, int]]:
+        """Build a dataset and production filter count from recorder history."""
+        recorder = get_instance(self.hass)
+        self.logger.info(
+            "Extracting dataset from recorder database: %s", recorder.db_url
+        )
         entities = [
             *self.config_entry.data[CONF_FEATURE_ENTITY],
             self.config_entry.data[CONF_TARGET_ENTITY],
         ]
-
-        # Run in executor since database operations are blocking
-        def _extract() -> tuple[int, pd.DataFrame]:
-            # Get recorder instance
-            recorder = get_instance(self.hass)
-            extractor = HomeAssistantStateExtractor(recorder.get_session())
-
-            raw_data = extractor.extract_states(entities)
-            pivot_data = extractor.pivot_to_wide_format(
-                raw_data, entities, self.config_entry.data[CONF_TARGET_ENTITY]
+        registry = er.async_get(self.hass)
+        operation_mode_entity = registry.async_get_entity_id(
+            "select",
+            DOMAIN,
+            f"{self.config_entry.entry_id}_{ENTITY_KEY_OPERATION_MODE}",
+        )
+        filter_settings = self.dataset_filter_settings
+        local_timezone = ZoneInfo(self.hass.config.time_zone)
+        start_timestamp = (
+            datetime.combine(filter_settings.date_from, time.min, tzinfo=local_timezone)
+            .astimezone(UTC)
+            .timestamp()
+            if filter_settings.date_from is not None
+            else None
+        )
+        end_timestamp = (
+            datetime.combine(
+                filter_settings.date_to + timedelta(days=1),
+                time.min,
+                tzinfo=local_timezone,
             )
-            return (len(pivot_data), pd.DataFrame(pivot_data))
+            .astimezone(UTC)
+            .timestamp()
+            if filter_settings.date_to is not None
+            else None
+        )
 
-        # Extract data in executor
-        number_of_rows, array = await self.hass.async_add_executor_job(_extract)
+        def _extract() -> HistoryPivotResult:
+            extractor = HomeAssistantStateExtractor(recorder.get_session())
+            raw_data = extractor.extract_states(
+                entities,
+                limit=0,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+                include_seed=start_timestamp is not None,
+            )
+            operation_rows = (
+                extractor.extract_states(
+                    [operation_mode_entity],
+                    limit=0,
+                    start_timestamp=start_timestamp,
+                    end_timestamp=end_timestamp,
+                    include_seed=start_timestamp is not None,
+                )
+                if operation_mode_entity is not None
+                else []
+            )
+            return pivot_state_history(
+                raw_data,
+                entities,
+                self.config_entry.data[CONF_TARGET_ENTITY],
+                operation_mode_rows=operation_rows,
+                settings=filter_settings,
+                local_timezone=local_timezone,
+            )
 
-        self.logger.info("Extracted %d rows from recorder database.", number_of_rows)
-        self.dataset = array
-        self.dataset_size = self.dataset.shape[0]
-        self.training_ready = self.dataset_size >= MIN_DATASET_SIZE
-        for entity in self.entity_registry:
-            entity.notify(MSG_DATASET_CHANGED)
+        result = await recorder.async_add_executor_job(_extract)
+        return (
+            pd.DataFrame(result.rows, columns=[DATASET_TIMESTAMP, *entities]),
+            result.filtered_counts,
+        )
 
 
 class HomeAssistantStateExtractor:
@@ -631,7 +959,11 @@ class HomeAssistantStateExtractor:
     def extract_states(
         self,
         entities: list[str],
+        *,
         limit: int = 5000,
+        start_timestamp: float | None = None,
+        end_timestamp: float | None = None,
+        include_seed: bool = False,
     ) -> list[tuple]:
         """
         Extract state data from database.
@@ -639,15 +971,25 @@ class HomeAssistantStateExtractor:
         Args:
             entities: List of entity IDs to extract
             limit: Optional limit on number of rows returned
+            start_timestamp: Optional inclusive Unix timestamp
+            end_timestamp: Optional exclusive Unix timestamp
+            include_seed: Include each entity's latest state before the start
 
         Returns:
             List of tuples: (timestamp, entity_id, state)
 
         """
         # Build query conditions
-        params = {"entities": tuple(entities)}
+        params: dict[str, Any] = {}
 
         limit_clause = f"LIMIT {limit}" if limit else ""
+        time_conditions = ""
+        if start_timestamp is not None:
+            time_conditions += " AND states.last_updated_ts >= :start_timestamp"
+            params["start_timestamp"] = start_timestamp
+        if end_timestamp is not None:
+            time_conditions += " AND states.last_updated_ts < :end_timestamp"
+            params["end_timestamp"] = end_timestamp
 
         query = text(f"""
         SELECT
@@ -657,6 +999,7 @@ class HomeAssistantStateExtractor:
         FROM states
         INNER JOIN states_meta ON states.metadata_id = states_meta.metadata_id
         WHERE states_meta.entity_id IN ({",".join(["'" + e + "'" for e in entities])})
+        {time_conditions}
         ORDER BY states.last_updated_ts, states_meta.entity_id
         {limit_clause}
         """)  # noqa: S608
@@ -665,10 +1008,39 @@ class HomeAssistantStateExtractor:
 
         with self.session_scope() as session:
             result = session.execute(query, params)
-            return [tuple(row) for row in result]
+            rows = [tuple(row) for row in result]
+            if include_seed and start_timestamp is not None:
+                for entity in entities:
+                    seed_query = text("""
+                        SELECT
+                            states.last_updated_ts,
+                            states_meta.entity_id,
+                            states.state
+                        FROM states
+                        INNER JOIN states_meta
+                            ON states.metadata_id = states_meta.metadata_id
+                        WHERE states_meta.entity_id = :entity_id
+                            AND states.last_updated_ts < :start_timestamp
+                        ORDER BY states.last_updated_ts DESC
+                        LIMIT 1
+                    """)
+                    seed = session.execute(
+                        seed_query,
+                        {
+                            "entity_id": entity,
+                            "start_timestamp": start_timestamp,
+                        },
+                    ).first()
+                    if seed is not None:
+                        rows.append(tuple(seed))
+            return sorted(rows, key=lambda row: (row[0], row[1]))
 
     def pivot_to_wide_format(
-        self, rows: list[tuple], entities: list[str], target_entity: str
+        self,
+        rows: list[tuple],
+        entities: list[str],
+        target_entity: str,
+        operation_mode_rows: list[tuple] | None = None,
     ) -> list[dict]:
         """
         Convert long format data to wide/pivot format with forward fill.
@@ -677,43 +1049,15 @@ class HomeAssistantStateExtractor:
             rows: List of (timestamp, entity_id, state) tuples
             entities: List of entity IDs
             target_entity: The target entity ID (must be present in all rows)
+            operation_mode_rows: Optional operation-mode state history
 
         Returns:
             List of dicts with timestamp + all entity states
 
         """
-        if not rows:
-            return []
-
-        # Group states by timestamp
-        timestamp_data = defaultdict(dict)
-        for timestamp, entity_id, state in rows:
-            timestamp_data[timestamp][entity_id] = state
-
-        # Get sorted timestamps
-        all_timestamps = sorted(timestamp_data.keys())
-
-        # Track last known state for forward fill
-        last_state = dict.fromkeys(entities, "")
-
-        # Build pivot rows
-        pivot_rows = []
-        for timestamp in all_timestamps:
-            # Update last known states with new values
-            for entity in entities:
-                if entity in timestamp_data[timestamp]:
-                    last_state[entity] = timestamp_data[timestamp][entity]
-
-            # Create row with all current states
-            row = {}
-            row.update({entity: last_state[entity] for entity in entities})
-
-            # Filter weird rows
-            if last_state[target_entity] == "":
-                continue
-
-            # Add only rows that have at least 2 actual values
-            if sum(last_state[e] != "" for e in entities) >= 2:  # noqa: PLR2004
-                pivot_rows.append(row)
-
-        return pivot_rows
+        return pivot_state_history(
+            rows,
+            entities,
+            target_entity,
+            operation_mode_rows=operation_mode_rows,
+        ).rows

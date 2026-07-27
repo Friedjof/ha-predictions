@@ -45,7 +45,8 @@ You can modify feature entities later via **Configure**, but this will reset you
 
 The integration creates these entities:
 
-- **Sensors**: Prediction Performance (accuracy %), Dataset Size (sample count), Current Prediction (state + confidence)
+- **Sensors**: Prediction Performance (accuracy %), Dataset Size (sample count),
+  Current Prediction (state + confidence), Last Training (timestamp)
 - **Buttons**: Store Instance (manual save), Evaluate Model / Train Production Model
   (requires 10+ samples)
 - **Mode Selector**: TRAINING (collect data) / PRODUCTION (make predictions)
@@ -58,6 +59,16 @@ The integration creates these entities:
 3. **Production**: Set mode to PRODUCTION. The final model is trained automatically
    from all available data and restored automatically after restarting Home Assistant.
 4. **Automation**: Create a Home Assistant automation that triggers when the prediction changes to control your target entity (e.g., switch lights). This is a security measure to ensure predictions don't directly control devices.
+
+`Last Training` changes only after successful evaluation or production training. New
+training events continue increasing `Dataset Size` without retraining the model. The
+dataset sensor attributes `model_is_stale` and `samples_at_last_training` show whether newer
+samples exist than those used by the current model.
+
+Automatic dataset collection only runs in `TRAINING`. In `PRODUCTION`, state events
+create predictions but are not added as training rows, preventing automations driven
+by a prediction from feeding their own result back into the model. `Store Instance`
+remains an explicit manual exception.
 
 ## Example Use Cases
 
@@ -74,6 +85,16 @@ The integration creates these entities:
 ## Development
 
 Based on [integration_blueprint](https://github.com/ludeeus/integration_blueprint). See [CONTRIBUTING.md](CONTRIBUTING.md) for setup details.
+
+Local Python dependencies and the project virtual environment are managed with
+[uv](https://docs.astral.sh/uv/). Install uv, then run:
+
+```bash
+uv sync --dev
+uv run pytest
+```
+
+`uv sync` creates and maintains `.venv` from the committed `uv.lock` file.
 
 ### Docker development environment
 
@@ -137,7 +158,7 @@ Create a Long-Lived Access Token in your Home Assistant user profile. Do not com
 the token or put it into a configuration file. Run the generator locally with:
 
 ```bash
-python3 scripts/generate_training_data.py --token YOUR_TOKEN
+uv run python scripts/generate_training_data.py --token YOUR_TOKEN
 ```
 
 By default, it creates 180 simulated situations across several days. Each situation
@@ -149,7 +170,7 @@ collects several hundred dataset rows.
 Useful options:
 
 ```bash
-python3 scripts/generate_training_data.py \
+uv run python scripts/generate_training_data.py \
   --token YOUR_TOKEN \
   --samples 500 \
   --seed 123 \
@@ -163,7 +184,7 @@ For continuous observation in training or production mode, run the live simulato
 
 ```bash
 export HA_TOKEN=YOUR_TOKEN
-python3 scripts/simulate_test_entities.py
+uv run python scripts/simulate_test_entities.py
 ```
 
 It advances a simulated clock by 15 minutes per iteration and updates the test
@@ -174,7 +195,7 @@ and noise, so predictions have a learnable pattern without becoming perfect.
 Useful live options:
 
 ```bash
-python3 scripts/simulate_test_entities.py \
+uv run python scripts/simulate_test_entities.py \
   --interval 1 \
   --step-minutes 30 \
   --noise 0.08 \
@@ -193,6 +214,28 @@ After generating data:
 3. Check **Prediction Performance** and the per-class metrics in its attributes.
 4. Change **Operation Mode** to `PRODUCTION`; final training starts automatically.
 5. Change the test feature entities and observe **Current Prediction**.
+
+Use **Rebuild Dataset from History** to replace the CSV with recorder data. The
+rebuild uses the Operation Mode history and excludes timestamps where the integration
+was in `PRODUCTION`; state changes from those periods are still used to reconstruct
+the first complete state after returning to `TRAINING`. In production mode, the
+cleaned dataset is retrained automatically. Recorder rebuilds are unavailable for
+attribute targets because their historical attributes are not imported yet.
+
+Dataset filters are configured from the integration's **Configure** dialog:
+
+- inclusive start and end dates
+- a daily time range, including ranges across midnight
+- selected weekdays
+- a minimum interval in seconds between accepted rows
+- whether every feature must have a valid state
+- whether `PRODUCTION` rows may be included
+
+Production rows are excluded by default because including them can feed automation
+effects caused by a prediction back into the model. Saving filter options does not
+replace the existing CSV. The dataset sensor reports `rebuild_required` until
+**Rebuild Dataset from History** applies the current filters. `Store Instance` is an
+explicit exception and stores the current state regardless of automatic filters.
 
 #### Fast development cycle
 

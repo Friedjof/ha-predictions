@@ -14,10 +14,11 @@ Github is used to host code, to track issues and feature requests, as well as ac
 Pull requests are the best way to propose changes to the codebase.
 
 1. Fork the repo and create your branch from `main`.
-2. If you've changed something, update the documentation.
-3. Make sure your code lints (using `scripts/lint`).
-4. Test you contribution.
-5. Issue that pull request!
+2. Run `uv sync --dev` to create `.venv` and install locked dependencies.
+3. If you've changed something, update the documentation.
+4. Make sure your code lints using `scripts/lint`.
+5. Run the tests using `scripts/test`.
+6. Issue that pull request!
 
 ## Any contributions you make will be under the MIT Software License
 
@@ -44,7 +45,7 @@ People *love* thorough bug reports. I'm not even kidding.
 
 ## Use a Consistent Coding Style
 
-Use [black](https://github.com/ambv/black) to make sure the code follows the style.
+Use `scripts/lint` to format and lint Python code with Ruff from the uv environment.
 
 ## Test your code modification
 

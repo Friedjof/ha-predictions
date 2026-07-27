@@ -121,9 +121,9 @@ class _DecisionTree:
             right_ratio = right_positive / right_count
             left_impurity = 2 * left_ratio * (1 - left_ratio)
             right_impurity = 2 * right_ratio * (1 - right_ratio)
-            return (
-                left_count * left_impurity + right_count * right_impurity
-            ) / len(y_sorted)
+            return (left_count * left_impurity + right_count * right_impurity) / len(
+                y_sorted
+            )
 
         cumulative_sum = np.cumsum(y_sorted)
         cumulative_square_sum = np.cumsum(y_sorted**2)
@@ -167,9 +167,7 @@ class _DecisionTree:
                 msg = "Decision tree contains an invalid node"
                 raise ValueError(msg)
             node = (
-                node.left
-                if row[node.feature_index] <= node.threshold
-                else node.right
+                node.left if row[node.feature_index] <= node.threshold else node.right
             )
         return node
 

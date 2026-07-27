@@ -53,9 +53,7 @@ class Model:
             "sampling": {"type": SamplingStrategy.SMOTE, "k_neighbors": 5},
         }
 
-    def predict(
-        self, data: np.ndarray
-    ) -> tuple[str | float, float | None] | NoneType:
+    def predict(self, data: np.ndarray) -> tuple[str | float, float | None] | NoneType:
         """
         Make predictions and return original values.
 

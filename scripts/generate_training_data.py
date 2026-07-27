@@ -11,7 +11,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-def call_service(base_url: str, token: str, domain: str, service: str, data: dict) -> None:
+def call_service(
+    base_url: str, token: str, domain: str, service: str, data: dict
+) -> None:
     """Call a Home Assistant service."""
     request = Request(
         f"{base_url}/api/services/{domain}/{service}",
@@ -22,7 +24,7 @@ def call_service(base_url: str, token: str, domain: str, service: str, data: dic
         },
         method="POST",
     )
-    with urlopen(request, timeout=10) as response:  # noqa: S310
+    with urlopen(request, timeout=10) as response:
         if response.status >= 300:
             raise RuntimeError(f"Home Assistant returned HTTP {response.status}")
 
@@ -95,7 +97,9 @@ def generate(args: argparse.Namespace) -> None:
 def main() -> None:
     """Parse command-line arguments and generate data."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--token", required=True, help="Home Assistant long-lived access token")
+    parser.add_argument(
+        "--token", required=True, help="Home Assistant long-lived access token"
+    )
     parser.add_argument("--url", default="http://localhost:8123")
     parser.add_argument("--samples", type=int, default=180)
     parser.add_argument("--delay", type=float, default=0.05)

@@ -8,6 +8,8 @@ from homeassistant.components.button import ButtonEntity, ButtonEntityDescriptio
 from slugify import slugify
 
 from custom_components.ha_predictions.const import (
+    CONF_TARGET_ATTRIBUTE,
+    ENTITY_KEY_REBUILD_DATASET,
     ENTITY_KEY_RUN_TRAINING,
     ENTITY_KEY_STORE_INSTANCE,
     MSG_DATASET_CHANGED,
@@ -48,6 +50,14 @@ async def async_setup_entry(
                     key=ENTITY_KEY_STORE_INSTANCE,
                     name="Store Instance",
                     icon="mdi:table-plus",
+                ),
+            ),
+            RebuildDatasetButton(
+                coordinator=entry.runtime_data.coordinator,
+                entity_description=ButtonEntityDescription(
+                    key=ENTITY_KEY_REBUILD_DATASET,
+                    name="Rebuild Dataset from History",
+                    icon="mdi:database-refresh",
                 ),
             ),
         ]
@@ -114,3 +124,30 @@ class RunTrainingButton(HAPredictionEntity, ButtonEntity):
         """Handle notifications from the coordinator."""
         if msg in (MSG_DATASET_CHANGED, MSG_OPERATION_MODE_CHANGED):
             self.schedule_update_ha_state()
+
+
+class RebuildDatasetButton(HAPredictionEntity, ButtonEntity):
+    """Button entity to rebuild training data from recorder history."""
+
+    def __init__(
+        self,
+        coordinator: HAPredictionUpdateCoordinator,
+        entity_description: ButtonEntityDescription,
+    ) -> None:
+        """Initialize the rebuild dataset button."""
+        super().__init__(coordinator)
+        self.entity_description = entity_description
+        self._attr_unique_id = (
+            self.coordinator.config_entry.entry_id
+            + UNDERSCORE
+            + ENTITY_KEY_REBUILD_DATASET
+        )
+
+    async def async_press(self) -> None:
+        """Rebuild the dataset from recorder history."""
+        await self.coordinator.async_rebuild_dataset()
+
+    @property
+    def available(self) -> bool:
+        """Return whether recorder history supports this target."""
+        return CONF_TARGET_ATTRIBUTE not in self.coordinator.config_entry.data

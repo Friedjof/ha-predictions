@@ -17,9 +17,20 @@ from .const import (
     CONF_FEATURE_ENTITY,
     CONF_TARGET_ATTRIBUTE,
     CONF_TARGET_ENTITY,
+    DEFAULT_FILTER_TIME_FROM,
+    DEFAULT_FILTER_TIME_TO,
+    DEFAULT_FILTER_WEEKDAYS,
     DOMAIN,
     LOGGER,
     OPT_FEATURES_CHANGED,
+    OPT_FILTER_DATE_FROM,
+    OPT_FILTER_DATE_TO,
+    OPT_FILTER_INCLUDE_PRODUCTION,
+    OPT_FILTER_MIN_INTERVAL,
+    OPT_FILTER_REQUIRE_COMPLETE,
+    OPT_FILTER_TIME_FROM,
+    OPT_FILTER_TIME_TO,
+    OPT_FILTER_WEEKDAYS,
 )
 
 if TYPE_CHECKING:
@@ -39,7 +50,7 @@ class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         """Get the options flow for this handler."""
         return HAPredictionsOptionsFlowHandler(config_entry)
 
-    async def async_step_user(
+    async def async_step_user(  # noqa: PLR0912
         self,
         user_input: dict | None = None,
     ) -> config_entries.ConfigFlowResult:
@@ -160,6 +171,14 @@ class HAPredictionsOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_FEATURE_ENTITY, []
             ):
                 errors["base"] = "target_entity_as_feature"
+            if not user_input.get(OPT_FILTER_WEEKDAYS):
+                errors["base"] = "filter_weekdays_empty"
+            if (
+                user_input.get(OPT_FILTER_DATE_FROM)
+                and user_input.get(OPT_FILTER_DATE_TO)
+                and user_input[OPT_FILTER_DATE_FROM] > user_input[OPT_FILTER_DATE_TO]
+            ):
+                errors["base"] = "filter_date_range_invalid"
 
             # Check if feature entities have changed
             old_features = set(self.config_entry.data.get(CONF_FEATURE_ENTITY, []))
@@ -175,8 +194,12 @@ class HAPredictionsOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_FEATURE_ENTITY: user_input[CONF_FEATURE_ENTITY],
                     },
                     options={
-                        **self.config_entry.options,
                         OPT_FEATURES_CHANGED: features_changed,
+                        **{
+                            key: value
+                            for key, value in user_input.items()
+                            if key != CONF_FEATURE_ENTITY
+                        },
                     },
                 )
 
@@ -184,6 +207,13 @@ class HAPredictionsOptionsFlowHandler(config_entries.OptionsFlow):
 
         # Get current feature entities from config entry
         current_features = self.config_entry.data.get(CONF_FEATURE_ENTITY, [])
+        current_options = self.config_entry.options
+
+        def optional_date(key: str) -> vol.Optional:
+            """Create an optional date marker with its current value."""
+            if value := current_options.get(key):
+                return vol.Optional(key, description={"suggested_value": value})
+            return vol.Optional(key)
 
         return self.async_show_form(
             step_id="init",
@@ -195,6 +225,62 @@ class HAPredictionsOptionsFlowHandler(config_entries.OptionsFlow):
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(multiple=True),
                     ),
+                    optional_date(OPT_FILTER_DATE_FROM): selector.DateSelector(),
+                    optional_date(OPT_FILTER_DATE_TO): selector.DateSelector(),
+                    vol.Required(
+                        OPT_FILTER_TIME_FROM,
+                        default=current_options.get(
+                            OPT_FILTER_TIME_FROM, DEFAULT_FILTER_TIME_FROM
+                        ),
+                    ): selector.TimeSelector(),
+                    vol.Required(
+                        OPT_FILTER_TIME_TO,
+                        default=current_options.get(
+                            OPT_FILTER_TIME_TO, DEFAULT_FILTER_TIME_TO
+                        ),
+                    ): selector.TimeSelector(),
+                    vol.Required(
+                        OPT_FILTER_WEEKDAYS,
+                        default=current_options.get(
+                            OPT_FILTER_WEEKDAYS, DEFAULT_FILTER_WEEKDAYS
+                        ),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                {"value": "0", "label": "Monday"},
+                                {"value": "1", "label": "Tuesday"},
+                                {"value": "2", "label": "Wednesday"},
+                                {"value": "3", "label": "Thursday"},
+                                {"value": "4", "label": "Friday"},
+                                {"value": "5", "label": "Saturday"},
+                                {"value": "6", "label": "Sunday"},
+                            ],
+                            multiple=True,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required(
+                        OPT_FILTER_MIN_INTERVAL,
+                        default=current_options.get(OPT_FILTER_MIN_INTERVAL, 0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=86400,
+                            step=1,
+                            mode=selector.NumberSelectorMode.BOX,
+                            unit_of_measurement="s",
+                        )
+                    ),
+                    vol.Required(
+                        OPT_FILTER_REQUIRE_COMPLETE,
+                        default=current_options.get(OPT_FILTER_REQUIRE_COMPLETE, True),
+                    ): selector.BooleanSelector(),
+                    vol.Required(
+                        OPT_FILTER_INCLUDE_PRODUCTION,
+                        default=current_options.get(
+                            OPT_FILTER_INCLUDE_PRODUCTION, False
+                        ),
+                    ): selector.BooleanSelector(),
                 }
             ),
             errors=errors,

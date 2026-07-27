@@ -10,7 +10,7 @@ def call_service(
     base_url: str, token: str, domain: str, service: str, data: dict
 ) -> None:
     """Call a Home Assistant service."""
-    request = Request(  # noqa: S310
+    request = Request(
         f"{base_url}/api/services/{domain}/{service}",
         data=json.dumps(data).encode(),
         headers={
@@ -19,15 +19,13 @@ def call_service(
         },
         method="POST",
     )
-    with urlopen(request, timeout=10) as response:  # noqa: S310
-        if response.status >= 300:  # noqa: PLR2004
+    with urlopen(request, timeout=10) as response:
+        if response.status >= 300:
             msg = f"Home Assistant returned HTTP {response.status}"
             raise RuntimeError(msg)
 
 
-def set_boolean(
-    base_url: str, token: str, entity_id: str, *, value: bool
-) -> None:
+def set_boolean(base_url: str, token: str, entity_id: str, *, value: bool) -> None:
     """Set an input_boolean state."""
     call_service(
         base_url,

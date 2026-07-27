@@ -52,7 +52,7 @@ class HouseholdSimulator:
         noise: float,
     ) -> None:
         """Initialize the simulation."""
-        self.rng = random.Random(seed)  # noqa: S311
+        self.rng = random.Random(seed)
         self.minute = int(start_hour * 60)
         self.step_minutes = step_minutes
         self.noise = noise
@@ -70,9 +70,7 @@ class HouseholdSimulator:
         sleeping = hour < SLEEP_END_HOUR or hour >= SLEEP_START_HOUR
 
         expected_home = (
-            weekend
-            or hour < MORNING_HOME_END_HOUR
-            or hour >= EVENING_HOME_START_HOUR
+            weekend or hour < MORNING_HOME_END_HOUR or hour >= EVENING_HOME_START_HOUR
         )
         if sleeping:
             expected_home = True
@@ -168,7 +166,7 @@ def run(args: argparse.Namespace) -> None:
         situation = simulator.next()
         publish(args, situation)
         iteration += 1
-        print(  # noqa: T201
+        print(
             f"{iteration:05d} day={situation.day} hour={situation.hour:05.2f} "
             f"lux={situation.lux:4d} presence={int(situation.presence)} "
             f"motion={int(situation.motion)} target={int(situation.target)} "
@@ -210,7 +208,7 @@ def main() -> None:
     try:
         run(args)
     except KeyboardInterrupt:
-        print("\nSimulation stopped.")  # noqa: T201
+        print("\nSimulation stopped.")
     except (HTTPError, URLError) as error:
         raise SystemExit(f"Could not reach Home Assistant: {error}") from error
 

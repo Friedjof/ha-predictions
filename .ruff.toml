@@ -23,6 +23,25 @@ ignore = [
     "PTH118",  # os.path.join should be replaced by Path (compatibility in tests)
     "PTH120",  # os.path.dirname should be replaced by Path.parent (compatibility in tests)
 ]
+"custom_components/ha_predictions/ml/evaluation.py" = [
+    "EM101",  # Existing validation messages are clearest at the raise site
+    "TRY003", # Existing validation messages are clearest at the raise site
+]
+"custom_components/ha_predictions/ml/model.py" = [
+    "EM101",   # Existing validation messages are clearest at the raise site
+    "PLR0915", # Training pipeline is intentionally kept in one function
+    "TRY003",  # Existing validation messages are clearest at the raise site
+]
+"scripts/**/*.py" = [
+    "EM102",   # CLI errors include dynamic API details
+    "FBT001",  # Boolean states map directly to Home Assistant service calls
+    "FBT003",  # Boolean states map directly to Home Assistant service calls
+    "PLR2004", # Scenario constants make simulations readable
+    "S310",    # URLs are supplied by the developer running the local script
+    "S311",    # Simulation randomness is intentionally non-cryptographic
+    "T201",    # CLI scripts report progress on stdout
+    "TRY003",  # CLI errors are constructed at their call sites
+]
 
 [lint.flake8-pytest-style]
 fixture-parentheses = false

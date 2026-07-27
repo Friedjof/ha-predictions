@@ -33,10 +33,7 @@ def test_lux_changes_on_every_iteration() -> None:
     simulator = create_simulator()
     lux_values = [simulator.next().lux for _ in range(200)]
 
-    assert all(
-        previous != current
-        for previous, current in pairwise(lux_values)
-    )
+    assert all(previous != current for previous, current in pairwise(lux_values))
 
 
 def test_target_is_correlated_but_not_deterministic() -> None:

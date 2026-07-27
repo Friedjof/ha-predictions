@@ -1,3 +1,25 @@
+[project]
+name = "ha-predictions"
+version = "1.0.0"
+description = "Machine-learning predictions for Home Assistant entities"
+readme = "README.md"
+requires-python = ">=3.13.2,<3.14"
+dependencies = [
+    "colorlog==6.10.1",
+    "homeassistant>=2025.12.0,<2026.3.0",
+    "numpy>=1.26.4",
+    "pandas>=2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ruff==0.14.13",
+]
+
+[tool.uv]
+package = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
