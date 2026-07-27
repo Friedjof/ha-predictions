@@ -11,7 +11,9 @@ from custom_components.ha_predictions.const import (
     ENTITY_KEY_RUN_TRAINING,
     ENTITY_KEY_STORE_INSTANCE,
     MSG_DATASET_CHANGED,
+    MSG_OPERATION_MODE_CHANGED,
     UNDERSCORE,
+    OperationMode,
 )
 
 from .entity import HAPredictionEntity
@@ -97,11 +99,18 @@ class RunTrainingButton(HAPredictionEntity, ButtonEntity):
         await self.coordinator.train()
 
     @property
+    def name(self) -> str:
+        """Return a mode-specific action name."""
+        if self.coordinator.operation_mode == OperationMode.PRODUCTION:
+            return "Train Production Model"
+        return "Evaluate Model"
+
+    @property
     def available(self) -> bool:
         """Return if entity is available."""
         return self.coordinator.training_ready
 
     def notify(self, msg: str) -> None:
         """Handle notifications from the coordinator."""
-        if msg == MSG_DATASET_CHANGED:
+        if msg in (MSG_DATASET_CHANGED, MSG_OPERATION_MODE_CHANGED):
             self.schedule_update_ha_state()

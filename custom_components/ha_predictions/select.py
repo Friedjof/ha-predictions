@@ -96,7 +96,7 @@ class HAPredictionSelectEntity(HAPredictionEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
-        self.coordinator.select_option(self.entity_description.key, option)
+        await self.coordinator.async_select_option(self.entity_description.key, option)
         self.schedule_update_ha_state()
 
     @cached_property

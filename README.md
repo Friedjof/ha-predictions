@@ -46,14 +46,17 @@ You can modify feature entities later via **Configure**, but this will reset you
 The integration creates these entities:
 
 - **Sensors**: Prediction Performance (accuracy %), Dataset Size (sample count), Current Prediction (state + confidence)
-- **Buttons**: Store Instance (manual save), Run Training (requires 10+ samples)
+- **Buttons**: Store Instance (manual save), Evaluate Model / Train Production Model
+  (requires 10+ samples)
 - **Mode Selector**: TRAINING (collect data) / PRODUCTION (make predictions)
 
 ## Workflow
 
 1. **Training Phase**: Set mode to TRAINING and let your home operate normally for days/weeks. Data is automatically collected. Monitor Dataset Size sensor.
-2. **Train Model**: Once you have 10+ samples, click **Run Training**. Check Prediction Performance sensor for accuracy.
-3. **Production**: Set mode to PRODUCTION to make real-time predictions based on trained model.
+2. **Evaluate Model**: Once you have 10+ samples, click **Evaluate Model**. Check
+   the Prediction Performance sensor for accuracy.
+3. **Production**: Set mode to PRODUCTION. The final model is trained automatically
+   from all available data and restored automatically after restarting Home Assistant.
 4. **Automation**: Create a Home Assistant automation that triggers when the prediction changes to control your target entity (e.g., switch lights). This is a security measure to ensure predictions don't directly control devices.
 
 ## Example Use Cases
@@ -161,9 +164,9 @@ fixed `--seed` makes a test run reproducible.
 After generating data:
 
 1. Check the **Dataset size** sensor.
-2. Press **Run Training**.
+2. Press **Evaluate Model**.
 3. Check **Prediction Performance** and the per-class metrics in its attributes.
-4. Change **Operation Mode** to `PRODUCTION`.
+4. Change **Operation Mode** to `PRODUCTION`; final training starts automatically.
 5. Change the test feature entities and observe **Current Prediction**.
 
 #### Fast development cycle

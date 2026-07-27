@@ -118,9 +118,6 @@ class DatasetSensor(HAPredictionEntity, SensorEntity):
 class CurrentPredictionSensor(HAPredictionEntity, SensorEntity):
     """Sensor to display the current prediction made by the model."""
 
-    prediction_label: str | float | NoneType = None
-    prediction_probability: float | NoneType = None
-
     def __init__(
         self,
         coordinator: HAPredictionUpdateCoordinator,
@@ -138,14 +135,19 @@ class CurrentPredictionSensor(HAPredictionEntity, SensorEntity):
     @property
     def native_value(self) -> str | float | None:
         """Return the native value of the sensor."""
-        # Implement logic to return the current prediction value
-        return self.prediction_label
+        if self.coordinator.current_prediction is not None:
+            return self.coordinator.current_prediction[0]
+        return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes of the sensor."""
         return {
-            "probability": self.prediction_probability,
+            "probability": (
+                self.coordinator.current_prediction[1]
+                if self.coordinator.current_prediction is not None
+                else None
+            ),
             "target_entity": self.coordinator.config_entry.data.get(CONF_TARGET_ENTITY),
             "target_attribute": self.coordinator.config_entry.data.get(
                 CONF_TARGET_ATTRIBUTE
@@ -155,7 +157,7 @@ class CurrentPredictionSensor(HAPredictionEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Return True if a prediction is available."""
-        return self.prediction_label is not None
+        return self.coordinator.current_prediction is not None
 
     @property
     def should_poll(self) -> bool:
@@ -168,8 +170,6 @@ class CurrentPredictionSensor(HAPredictionEntity, SensorEntity):
             msg is MSG_PREDICTION_MADE
             and self.coordinator.current_prediction is not None
         ):
-            self.prediction_label = self.coordinator.current_prediction[0]
-            self.prediction_probability = self.coordinator.current_prediction[1]
             self.schedule_update_ha_state()
 
 

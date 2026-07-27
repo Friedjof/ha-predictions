@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 from homeassistant.helpers.recorder import get_instance
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from sqlalchemy import text
 
@@ -22,12 +23,14 @@ from .const import (
     CONF_FEATURE_ENTITY,
     CONF_TARGET_ATTRIBUTE,
     CONF_TARGET_ENTITY,
+    DOMAIN,
     ENTITY_KEY_ALGORITHM,
     ENTITY_KEY_OPERATION_MODE,
     ENTITY_KEY_SAMPLING_STRATEGY,
     LOGGER,
     MIN_DATASET_SIZE,
     MSG_DATASET_CHANGED,
+    MSG_OPERATION_MODE_CHANGED,
     MSG_PREDICTION_MADE,
     MSG_TRAINING_DONE,
     MSG_TRAINING_SETTINGS_CHANGED,
@@ -69,9 +72,16 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
         self.training_ready: bool = False
         self.current_prediction: tuple[str | float, float | None] | NoneType = None
         self._dirty: bool = False
+        self._settings_store: Store[dict[str, Any]] | None = None
 
     async def initialize(self) -> NoneType:
         """Initialize the coordinator."""
+        self._settings_store = Store(
+            self.hass,
+            1,
+            f"{DOMAIN}.{self.config_entry.entry_id}.settings",
+        )
+        await self._async_load_settings()
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self.read_table)
         if self.dataset is None:
@@ -94,6 +104,61 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
                         "available in the state query."
                     )
                 self._initialize_dataframe()
+        if self.operation_mode == OperationMode.PRODUCTION and self.training_ready:
+            self.logger.info("Restoring production model from stored dataset.")
+            await self.train()
+
+    async def _async_load_settings(self) -> None:
+        """Restore persisted model and operation settings."""
+        if self._settings_store is None:
+            return
+        settings = await self._settings_store.async_load()
+        if not settings:
+            return
+
+        try:
+            self.operation_mode = OperationMode(settings["operation_mode"])
+        except (KeyError, ValueError):
+            self.operation_mode = OperationMode.TRAINING
+        try:
+            self.model.algorithm = Algorithm(settings["algorithm"])
+        except (KeyError, ValueError):
+            self.model.algorithm = Algorithm.LINEAR
+
+        sampling = settings.get("sampling_strategy", SAMPLING_SMOTE)
+        if sampling == SAMPLING_RANDOM:
+            self.model.transformations["sampling"] = {
+                "type": SamplingStrategy.RANDOM_OVER
+            }
+        elif sampling == SAMPLING_SMOTE:
+            self.model.transformations["sampling"] = {
+                "type": SamplingStrategy.SMOTE,
+                "k_neighbors": 5,
+            }
+        else:
+            self.model.transformations.pop("sampling", None)
+
+        if settings.get("zscores", True):
+            self.model.transformations["zscores"] = {}
+        else:
+            self.model.transformations.pop("zscores", None)
+
+    async def _async_save_settings(self) -> None:
+        """Persist model and operation settings."""
+        if self._settings_store is None:
+            return
+        await self._settings_store.async_save(
+            {
+                "operation_mode": self.operation_mode.value,
+                "algorithm": self.model.algorithm.value,
+                "sampling_strategy": self.get_option(ENTITY_KEY_SAMPLING_STRATEGY),
+                "zscores": "zscores" in self.model.transformations,
+            }
+        )
+
+    def _schedule_settings_save(self) -> None:
+        """Schedule persistence from synchronous entity callbacks."""
+        self.hass.async_create_task(self._async_save_settings())
 
     async def _async_update_data(self) -> Any:
         """Update data via library."""
@@ -120,10 +185,12 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             self.model.transformations["zscores"] = {}
             [e.notify(MSG_TRAINING_SETTINGS_CHANGED) for e in self.entity_registry]
             self.logger.info("Z-Score normalization enabled.")
+            self._schedule_settings_save()
         elif not value and "zscores" in self.model.transformations:
             self.model.transformations.pop("zscores", None)
             [e.notify(MSG_TRAINING_SETTINGS_CHANGED) for e in self.entity_registry]
             self.logger.info("Z-Score normalization disabled.")
+            self._schedule_settings_save()
 
     def get_option(self, key: str) -> str | NoneType:
         """Get the current option for a given key."""
@@ -149,20 +216,31 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             return SAMPLING_NONE
         return None
 
-    def select_option(self, key: str, value: str) -> NoneType:
+    async def async_select_option(self, key: str, value: str) -> NoneType:
         """Change the selected option."""
         if key == ENTITY_KEY_OPERATION_MODE:
-            self._set_operation_mode(OperationMode[value])
+            await self._async_set_operation_mode(OperationMode[value])
         elif key == ENTITY_KEY_ALGORITHM:
             self._set_algorithm(value)
         elif key == ENTITY_KEY_SAMPLING_STRATEGY:
             self._set_sampling_strategy(value)
 
-    def _set_operation_mode(self, mode: OperationMode) -> None:
+    async def _async_set_operation_mode(self, mode: OperationMode) -> None:
         """Set the operation mode."""
         if mode != self.operation_mode:
             self.operation_mode = mode
             self.logger.info("Operation mode has been changed to %s", mode)
+            [e.notify(MSG_OPERATION_MODE_CHANGED) for e in self.entity_registry]
+            await self._async_save_settings()
+            if mode == OperationMode.PRODUCTION:
+                if self.training_ready:
+                    self.logger.info("Training production model after mode change.")
+                    await self.train()
+                else:
+                    self.logger.warning(
+                        "Production mode selected, but at least %d samples are needed.",
+                        MIN_DATASET_SIZE,
+                    )
 
     def _set_sampling_strategy(self, strategy: str) -> NoneType:
         """Set the sampling strategy for handling imbalanced datasets."""
@@ -172,6 +250,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             }
             [e.notify(MSG_TRAINING_SETTINGS_CHANGED) for e in self.entity_registry]
             self.logger.info("Random oversampling enabled.")
+            self._schedule_settings_save()
         elif strategy == SAMPLING_SMOTE:
             self.model.transformations["sampling"] = {
                 "type": SamplingStrategy.SMOTE,
@@ -179,10 +258,12 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             }
             [e.notify(MSG_TRAINING_SETTINGS_CHANGED) for e in self.entity_registry]
             self.logger.info("SMOTE enabled.")
+            self._schedule_settings_save()
         else:
             self.model.transformations.pop("sampling", None)
             [e.notify(MSG_TRAINING_SETTINGS_CHANGED) for e in self.entity_registry]
             self.logger.info("Sampling disabled.")
+            self._schedule_settings_save()
 
     def _set_algorithm(self, algorithm: str) -> None:
         """Set the machine-learning algorithm."""
@@ -195,6 +276,7 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             self.model.algorithm = selected
             [e.notify(MSG_TRAINING_SETTINGS_CHANGED) for e in self.entity_registry]
             self.logger.info("Algorithm changed to %s.", algorithm)
+            self._schedule_settings_save()
 
     def state_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle state changes of monitored entities."""
@@ -235,6 +317,14 @@ class HAPredictionUpdateCoordinator(DataUpdateCoordinator):
             entity.notify(MSG_DATASET_CHANGED)
 
         # Make prediction if model is ready
+        if (
+            self.operation_mode == OperationMode.PRODUCTION
+            and self.training_ready
+            and not self.model.prediction_ready
+        ):
+            self.logger.info("Training production model after dataset became ready.")
+            await self.train()
+            return
         if self.model.prediction_ready and self.dataset is not None:
             self.logger.info("Making new prediction after state change.")
             await self._async_make_prediction()
