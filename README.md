@@ -159,6 +159,31 @@ python3 scripts/generate_training_data.py \
 Use `--url` when Home Assistant is not running at `http://localhost:8123`. The
 fixed `--seed` makes a test run reproducible.
 
+For continuous observation in training or production mode, run the live simulator:
+
+```bash
+export HA_TOKEN=YOUR_TOKEN
+python3 scripts/simulate_test_entities.py
+```
+
+It advances a simulated clock by 15 minutes per iteration and updates the test
+entities every two seconds. Presence, motion, daylight and weather evolve as a
+coherent household scenario. The target follows those features with some hysteresis
+and noise, so predictions have a learnable pattern without becoming perfect.
+
+Useful live options:
+
+```bash
+python3 scripts/simulate_test_entities.py \
+  --interval 1 \
+  --step-minutes 30 \
+  --noise 0.08 \
+  --iterations 200
+```
+
+An iteration count of `0` runs until `Ctrl+C`. Use `--dry-run` to inspect generated
+states without sending API requests. `HA_URL` can be used instead of `--url`.
+
 #### Train and test predictions
 
 After generating data:
