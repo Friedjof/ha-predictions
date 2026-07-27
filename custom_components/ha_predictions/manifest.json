@@ -13,8 +13,7 @@
   ],
   "requirements": [
     "pandas>=2.0.0",
-    "numpy>=1.26.4",
-    "scikit-learn>=1.4.0"
+    "numpy>=1.26.4"
   ],
   "version": "1.0.0"
 }

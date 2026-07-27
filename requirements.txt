@@ -5,4 +5,3 @@ pytest>=8.0.0
 ruff==0.14.13
 pandas>=2.0.0
 numpy>=1.26.4
-scikit-learn>=1.4.0

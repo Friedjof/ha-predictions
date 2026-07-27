@@ -5,10 +5,9 @@ from types import NoneType
 from typing import Any
 
 import numpy as np
-from sklearn.tree import export_text
 
-from .classifiers import DecisionTreeClassifier
 from .const import Algorithm, SamplingStrategy
+from .decision_tree import DecisionTreeClassifier, DecisionTreeRegressor
 from .evaluation import (
     accuracy,
     mae,
@@ -18,7 +17,7 @@ from .evaluation import (
 )
 from .exceptions import ModelNotTrainedError
 from .logistic_regression import LogisticRegression
-from .regressors import DecisionTreeRegressor, LinearRegressor
+from .regressors import LinearRegressor
 from .sampling import random_oversample, smote
 
 
@@ -330,9 +329,7 @@ class Model:
     ) -> None:
         """Expose decision-tree rules and clear stale descriptions."""
         if isinstance(model, (DecisionTreeClassifier, DecisionTreeRegressor)):
-            self.model_description = export_text(
-                model.estimator, feature_names=self.feature_names
-            )
+            self.model_description = model.export_text(self.feature_names)
         else:
             self.model_description = None
 
