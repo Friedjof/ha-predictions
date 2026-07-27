@@ -141,3 +141,34 @@ async def async_reload_entry(
         )
 
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant,
+    entry: HAPredictionConfigEntry,
+) -> bool:
+    """Migrate older configuration entries."""
+    if entry.version > 3:  # noqa: PLR2004
+        return False
+
+    if entry.version < 3:  # noqa: PLR2004
+        target_entity = entry.data[CONF_TARGET_ENTITY]
+        features = list(
+            dict.fromkeys(
+                feature
+                for feature in entry.data.get(CONF_FEATURE_ENTITY, [])
+                if feature != target_entity
+            )
+        )
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_FEATURE_ENTITY: features},
+            version=3,
+        )
+        LOGGER.info(
+            "Migrated config entry %s to version 3 with %d feature entities",
+            entry.entry_id,
+            len(features),
+        )
+
+    return True

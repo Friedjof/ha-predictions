@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     """Config flow for HA Predictions."""
 
-    VERSION = 2
+    VERSION = 3
 
     @staticmethod
     @callback
@@ -75,7 +75,7 @@ class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Check if target entity is of correct domain
             if not _errors and not target_attribute:
-                target_domain = target_entity.split(".")[0]
+                target_domain = target_entity.split(".", maxsplit=1)[0]
                 if target_domain not in ["light", "switch", "input_boolean"]:
                     _errors["base"] = "target_entity_wrong_domain"
 
@@ -86,6 +86,9 @@ class HAPredictionsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 and target_attribute not in target_entity_state.attributes
             ):
                 _errors["base"] = "target_attribute_not_found"
+
+            if not _errors and target_entity in feature_entities:
+                _errors["base"] = "target_entity_as_feature"
 
             # Check if all feature entities exist
             if not _errors:
@@ -151,26 +154,33 @@ class HAPredictionsOptionsFlowHandler(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Manage the options."""
+        errors = {}
         if user_input is not None:
+            if self.config_entry.data[CONF_TARGET_ENTITY] in user_input.get(
+                CONF_FEATURE_ENTITY, []
+            ):
+                errors["base"] = "target_entity_as_feature"
+
             # Check if feature entities have changed
             old_features = set(self.config_entry.data.get(CONF_FEATURE_ENTITY, []))
             new_features = set(user_input.get(CONF_FEATURE_ENTITY, []))
             features_changed = old_features != new_features
 
             # Update the config entry with new data
-            self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data={
-                    **self.config_entry.data,
-                    CONF_FEATURE_ENTITY: user_input[CONF_FEATURE_ENTITY],
-                },
-                options={
-                    **self.config_entry.options,
-                    OPT_FEATURES_CHANGED: features_changed,
-                },
-            )
+            if not errors:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={
+                        **self.config_entry.data,
+                        CONF_FEATURE_ENTITY: user_input[CONF_FEATURE_ENTITY],
+                    },
+                    options={
+                        **self.config_entry.options,
+                        OPT_FEATURES_CHANGED: features_changed,
+                    },
+                )
 
-            return self.async_create_entry(title="", data={})
+                return self.async_create_entry(title="", data={})
 
         # Get current feature entities from config entry
         current_features = self.config_entry.data.get(CONF_FEATURE_ENTITY, [])
@@ -187,4 +197,5 @@ class HAPredictionsOptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                 }
             ),
+            errors=errors,
         )
